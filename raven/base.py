@@ -183,6 +183,11 @@ class Client(object):
             context = {'sys.argv': sys.argv[:]}
         self.extra = context
 
+        tags = o.get('tags', None)
+        if tags is None:
+            tags = {}
+        self.tags = tags
+
         self.module_cache = ModuleProxyCache()
 
         # servers may be set to a NoneType (for Django)
@@ -335,7 +340,14 @@ class Client(object):
         if not data.get('modules'):
             data['modules'] = self.get_module_versions()
 
-        data['tags'] = tags or {}
+        data.setdefault('tags', {})
+        if self.tags:
+            for k, v in self.tags.iteritems():
+                data['tags'].setdefault(k, v)
+        if tags:
+            for k, v in tags.iteritems():
+                data['tags'][k] = v
+
         data.setdefault('extra', {})
         data.setdefault('level', logging.ERROR)
 
