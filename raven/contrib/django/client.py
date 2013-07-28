@@ -11,12 +11,14 @@ from __future__ import absolute_import
 import logging
 
 from django.conf import settings
+from django.core.exceptions import SuspiciousOperation
 from django.http import HttpRequest
 from django.template import TemplateSyntaxError
 from django.template.loader import LoaderOrigin
 
 from raven.base import Client
-from raven.contrib.django.utils import get_data_from_template
+from raven.contrib.django.utils import get_data_from_template, get_host
+from raven.contrib.django.middleware import SentryLogMiddleware
 from raven.utils.wsgi import get_headers, get_environ
 
 __all__ = ('DjangoClient',)
@@ -28,27 +30,51 @@ class DjangoClient(Client):
     def is_enabled(self):
         return bool(self.servers or 'sentry' in settings.INSTALLED_APPS)
 
-    def get_user_info(self, request):
-        if request.user.is_authenticated():
-            user_info = {
-                'is_authenticated': True,
-                'id': request.user.pk,
-                'username': request.user.username,
-                'email': request.user.email,
-            }
-        else:
-            user_info = {
-                'is_authenticated': False,
-            }
+    def get_user_info(self, user):
+        if not user.is_authenticated():
+            return {}
+
+        user_info = {
+            'id': user.pk,
+        }
+
+        if hasattr(user, 'email'):
+            user_info['email'] = user.email
+
+        if hasattr(user, 'get_username'):
+            user_info['username'] = user.get_username()
+        elif hasattr(user, 'username'):
+            user_info['username'] = user.username
+
         return user_info
 
     def get_data_from_request(self, request):
-        from django.contrib.auth.models import User, AnonymousUser
+        try:
+            from django.contrib.auth.models import AbstractBaseUser as BaseUser
+        except ImportError:
+            from django.contrib.auth.models import User as BaseUser  # NOQA
+
+        result = {}
+
+        if hasattr(request, 'user') and isinstance(request.user, BaseUser):
+            result['sentry.interfaces.User'] = self.get_user_info(request.user)
+
+        try:
+            uri = request.build_absolute_uri()
+        except SuspiciousOperation:
+            # attempt to build a URL for reporting as Django won't allow us to
+            # use get_host()
+            if request.is_secure():
+                scheme = 'https'
+            else:
+                scheme = 'http'
+            host = get_host(request)
+            uri = '%s://%s%s' % (scheme, host, request.path)
 
         if request.method != 'GET':
-            if hasattr(request, 'body'):
+            try:
                 data = request.body
-            else:
+            except:
                 try:
                     data = request.raw_post_data and request.raw_post_data or request.POST
                 except Exception:
@@ -59,20 +85,17 @@ class DjangoClient(Client):
 
         environ = request.META
 
-        result = {
+        result.update({
             'sentry.interfaces.Http': {
                 'method': request.method,
-                'url': request.build_absolute_uri(),
+                'url': uri,
                 'query_string': request.META.get('QUERY_STRING'),
                 'data': data,
                 'cookies': dict(request.COOKIES),
                 'headers': dict(get_headers(environ)),
                 'env': dict(get_environ(environ)),
             }
-        }
-
-        if hasattr(request, 'user') and isinstance(request.user, (User, AnonymousUser)):
-            result['sentry.interfaces.User'] = self.get_user_info(request)
+        })
 
         return result
 
@@ -91,8 +114,8 @@ class DjangoClient(Client):
 
         if not self.site and 'django.contrib.sites' in settings.INSTALLED_APPS:
             try:
-                from django.contrib.sites import models as site_models
-                site = site_models.Site.objects.get_current()
+                from django.contrib.sites.models import Site
+                site = Site.objects.get_current()
                 site_name = site.name or site.domain
                 data['tags'].setdefault('site', site_name)
             except Exception:
@@ -106,6 +129,9 @@ class DjangoClient(Client):
             kwargs['data'] = data = {}
         else:
             data = kwargs['data']
+
+        if request is None:
+            request = getattr(SentryLogMiddleware.thread, 'request', None)
 
         is_http_request = isinstance(request, HttpRequest)
         if is_http_request:
@@ -146,8 +172,10 @@ class DjangoClient(Client):
         elif 'sentry' in settings.INSTALLED_APPS:
             try:
                 return self.send_integrated(kwargs)
-            except Exception, e:
-                self.error_logger.error('Unable to record event: %s', e, exc_info=True)
+            except Exception as e:
+                self.error_logger.error(
+                    'Unable to record event: %s\nEvent was: %r', e,
+                    kwargs['message'], exc_info=True)
 
     def send_integrated(self, kwargs):
         from sentry.models import Group

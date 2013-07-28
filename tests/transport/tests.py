@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
+from __future__ import unicode_literals
 
-from unittest2 import TestCase
+from raven.utils.testutils import TestCase
 from raven.base import Client
 
 # Some internal stuff to extend the transport layer
@@ -63,7 +64,7 @@ class TransportTest(TestCase):
     def test_custom_transport(self):
         c = Client(dsn="mock://some_username:some_password@localhost:8143/1")
 
-        data = dict(a=42, b=55, c=range(50))
+        data = dict(a=42, b=55, c=list(range(50)))
         c.send(**data)
 
         expected_message = c.encode(data)
@@ -73,7 +74,7 @@ class TransportTest(TestCase):
 
     def test_build_then_send(self):
         c = Client(dsn="mock://some_username:some_password@localhost:8143/1",
-                name="test_server")
+            name="test_server")
 
         mydate = datetime.datetime(2012, 5, 4, tzinfo=pytz.utc)
         d = calendar.timegm(mydate.timetuple())
@@ -81,9 +82,8 @@ class TransportTest(TestCase):
         expected = {
             'project': '1',
             'sentry.interfaces.Message': {'message': 'foo', 'params': ()},
-            'server_name': u'test_server',
+            'server_name': 'test_server',
             'level': 40,
-            'checksum': 'acbd18db4cc2f85cedef654fccc4a4d8',
             'modules': {},
             'tags': {},
             'time_spent': None,

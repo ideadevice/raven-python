@@ -5,15 +5,16 @@ raven.transport.threaded
 :copyright: (c) 2010-2012 by the Sentry Team, see AUTHORS for more details.
 :license: BSD, see LICENSE for more details.
 """
+from __future__ import absolute_import
 
 import atexit
 import logging
 import time
 import threading
 import os
-from Queue import Queue
+from raven.utils.compat import Queue
 
-from raven.transport.base import HTTPTransport
+from raven.transport.base import HTTPTransport, AsyncTransport
 
 DEFAULT_TIMEOUT = 10
 
@@ -36,12 +37,12 @@ class AsyncWorker(object):
         size = self._queue.qsize()
         if size:
             timeout = self.options['shutdown_timeout']
-            print "Sentry is attempting to send %s pending error messages" % size
-            print "Waiting up to %s seconds" % timeout
+            print("Sentry is attempting to send %s pending error messages" % size)
+            print("Waiting up to %s seconds" % timeout)
             if os.name == 'nt':
-                print "Press Ctrl-Break to quit"
+                print("Press Ctrl-Break to quit")
             else:
-                print "Press Ctrl-C to quit"
+                print("Press Ctrl-C to quit")
             self.stop(timeout=timeout)
 
     def start(self):
@@ -88,7 +89,7 @@ class AsyncWorker(object):
             time.sleep(0)
 
 
-class ThreadedHTTPTransport(HTTPTransport):
+class ThreadedHTTPTransport(AsyncTransport, HTTPTransport):
 
     scheme = ['threaded+http', 'threaded+https']
 
@@ -103,8 +104,14 @@ class ThreadedHTTPTransport(HTTPTransport):
             self._worker = AsyncWorker()
         return self._worker
 
-    def send_sync(self, data, headers):
-        super(ThreadedHTTPTransport, self).send(data, headers)
+    def send_sync(self, data, headers, success_cb, failure_cb):
+        try:
+            super(ThreadedHTTPTransport, self).send(data, headers)
+        except Exception as e:
+            failure_cb(e)
+        else:
+            success_cb()
 
-    def send(self, data, headers):
-        self.get_worker().queue(self.send_sync, data, headers)
+    def async_send(self, data, headers, success_cb, failure_cb):
+        self.get_worker().queue(self.send_sync, data, headers, success_cb,
+            failure_cb)

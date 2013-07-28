@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
+from __future__ import unicode_literals
 
 from mock import Mock
-from unittest2 import TestCase
+from raven.utils.testutils import TestCase
+from raven.utils import six
 
-from raven.utils.stacks import get_culprit, get_stack_info
+from raven.utils.stacks import get_culprit, get_stack_info, get_lines_from_file
 
 
 class Context(object):
@@ -12,7 +14,7 @@ class Context(object):
 
     __getitem__ = lambda s, *a: s.dict.__getitem__(*a)
     __setitem__ = lambda s, *a: s.dict.__setitem__(*a)
-    iterkeys = lambda s, *a: s.dict.iterkeys(*a)
+    iterkeys = lambda s, *a: six.iterkeys(s.dict, *a)
 
 
 class GetCulpritTest(TestCase):
@@ -32,7 +34,7 @@ class GetCulpritTest(TestCase):
 
     def test_no_module_or_function(self):
         culprit = get_culprit([{}])
-        assert culprit == None
+        assert culprit is None
 
     def test_all_params(self):
         culprit = get_culprit([{
@@ -58,10 +60,25 @@ class GetStackInfoTest(TestCase):
         results = get_stack_info(frames)
         self.assertEquals(len(results), 1)
         result = results[0]
-        self.assertTrue('vars' in result)
-        vars = result['vars']
-        self.assertTrue(isinstance(vars, dict))
-        self.assertTrue('foo' in vars)
-        self.assertEquals(vars['foo'], 'bar')
-        self.assertTrue('biz' in vars)
-        self.assertEquals(vars['biz'], 'baz')
+        assert 'vars' in result
+        if six.PY3:
+            expected = {
+                "'foo'": "'bar'",
+                "'biz'": "'baz'",
+            }
+        else:
+            expected = {
+                "u'foo'": "u'bar'",
+                "u'biz'": "u'baz'",
+            }
+        assert result['vars'] == expected
+
+
+class GetLineFromFileTest(TestCase):
+
+    def test_non_ascii_file(self):
+        import os.path
+        filename = os.path.join(os.path.dirname(__file__), 'utf8_file.txt')
+        self.assertEqual(
+            get_lines_from_file(filename, 3, 1),
+            (['Some code here'], '', ['lorem ipsum']))

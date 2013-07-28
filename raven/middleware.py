@@ -5,9 +5,10 @@ raven.middleware
 :copyright: (c) 2010-2012 by the Sentry Team, see AUTHORS for more details.
 :license: BSD, see LICENSE for more details.
 """
+from __future__ import absolute_import
 
-from raven.utils.wsgi import get_current_url, get_headers, \
-  get_environ
+from raven.utils.wsgi import (
+    get_current_url, get_headers, get_environ)
 
 
 class Sentry(object):
@@ -18,8 +19,11 @@ class Sentry(object):
     >>> from raven.base import Client
     >>> application = Sentry(application, Client())
     """
-    def __init__(self, application, client):
+    def __init__(self, application, client=None):
         self.application = application
+        if client is None:
+            from raven.base import Client
+            client = Client()
         self.client = client
 
     def __call__(self, environ, start_response):

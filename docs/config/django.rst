@@ -10,12 +10,18 @@ Using the Django integration is as simple as adding :mod:`raven.contrib.django.r
         'raven.contrib.django.raven_compat',
     )
 
+.. note:: This causes Raven to install a hook in Django that will automatically report uncaught exceptions.
+
 Additional settings for the client are configured using the ``RAVEN_CONFIG`` dictionary::
 
     RAVEN_CONFIG = {
         'dsn': 'http://public:secret@example.com/1',
     }
 
+Once you've configured the client, you can test it using the standard Django
+management interface::
+
+    python manage.py raven test
 
 You'll be referencing the client slightly differently in Django as well::
 
@@ -47,8 +53,8 @@ Integration with :mod:`logging`
 
 To integrate with the standard library's :mod:`logging` module:
 
-Django 1.3
-~~~~~~~~~~
+Django 1.3 or Newer
+~~~~~~~~~~~~~~~~~~~
 
 ::
 
@@ -186,7 +192,10 @@ middleware which will ensure that you catch errors even at the fundamental
 level of your Django application::
 
     from raven.contrib.django.raven_compat.middleware.wsgi import Sentry
-    application = Sentry(django.core.handlers.wsgi.WSGIHandler())
+    from django.core.handlers.wsgi import WSGIHandler
+    
+    application = Sentry(WSGIHandler())
+
 
 Additional Settings
 -------------------
@@ -252,3 +261,32 @@ will need to add a hook to gunicorn to activate Raven::
     def when_ready(server):
         from django.core.management import call_command
         call_command('validate')
+
+Circus
+~~~~~~
+
+If you are running Django with `circus <http://circus.rtfd.org/>`_ and
+`chaussette <http://chaussette.readthedocs.org/>`_ you will also need
+to add a hook to circus to activate Raven::
+
+    def run_raven(*args, **kwargs):
+        """Set up raven for django by running a django command.
+        It is necessary because chaussette doesn't run a django command.
+    
+        """
+        from django.core.management import call_command
+        call_command('validate')
+        return True
+
+And in your circus configuration::
+
+    [socket:dwebapp]
+    host = 127.0.0.1
+    port = 8080
+
+    [watcher:dwebworker]
+    cmd = chaussette --fd $(circus.sockets.dwebapp) dproject.wsgi.application
+    use_sockets = True
+    numprocesses = 2
+    hooks.after_start = dproject.hooks.run_raven
+

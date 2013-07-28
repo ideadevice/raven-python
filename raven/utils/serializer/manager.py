@@ -5,8 +5,11 @@ raven.utils.serializer.manager
 :copyright: (c) 2010-2012 by the Sentry Team, see AUTHORS for more details.
 :license: BSD, see LICENSE for more details.
 """
+from __future__ import absolute_import
+
 import logging
 from contextlib import closing
+from raven.utils import six
 
 __all__ = ('register', 'transform')
 
@@ -64,18 +67,18 @@ class Serializer(object):
                 if serializer.can(value):
                     try:
                         return serializer.serialize(value, **kwargs)
-                    except Exception, e:
+                    except Exception as e:
                         logger.exception(e)
-                        return unicode(type(value))
+                        return six.text_type(type(value))
 
             # if all else fails, lets use the repr of the object
             try:
-                return self.transform(repr(value), **kwargs)
-            except Exception, e:
+                return repr(value)
+            except Exception as e:
                 logger.exception(e)
                 # It's common case that a model's __unicode__ definition may try to query the database
                 # which if it was not cleaned up correctly, would hit a transaction aborted exception
-                return unicode(type(value))
+                return six.text_type(type(value))
         finally:
             self.context.remove(objid)
 

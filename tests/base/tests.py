@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
+from __future__ import unicode_literals
 
 import inspect
 import mock
+import pytest
 import raven
 import time
 from socket import socket, AF_INET, SOCK_DGRAM
-from unittest2 import TestCase
 from raven.base import Client, ClientState
+from raven.transport import AsyncTransport
 from raven.utils.stacks import iter_stack_frames
+from raven.utils import six
+from raven.utils.testutils import TestCase
 
 
 class TempStoreClient(Client):
@@ -68,13 +72,14 @@ class ClientTest(TestCase):
         base.Raven = None
 
         client = Client()
-        client2 = Client()  # NOQA
+        client2 = Client()
 
         assert base.Raven is client
+        assert client is not client2
 
-    @mock.patch('raven.base.Client._send_remote')
+    @mock.patch('raven.transport.base.HTTPTransport.send')
     @mock.patch('raven.base.ClientState.should_try')
-    def test_send_remote_failover(self, should_try, send_remote):
+    def test_send_remote_failover(self, should_try, send):
         should_try.return_value = True
 
         client = Client(
@@ -85,14 +90,46 @@ class ClientTest(TestCase):
         )
 
         # test error
-        send_remote.side_effect = Exception()
+        send.side_effect = Exception()
         client.send_remote('http://example.com/api/store', 'foo')
         self.assertEquals(client.state.status, client.state.ERROR)
 
         # test recovery
-        send_remote.side_effect = None
+        send.side_effect = None
         client.send_remote('http://example.com/api/store', 'foo')
         self.assertEquals(client.state.status, client.state.ONLINE)
+
+    @mock.patch('raven.base.Client._registry.get_transport')
+    @mock.patch('raven.base.ClientState.should_try')
+    def test_async_send_remote_failover(self, should_try, get_transport):
+        should_try.return_value = True
+        async_transport = AsyncTransport()
+        async_transport.async_send = async_send = mock.Mock()
+        get_transport.return_value = async_transport
+
+        client = Client(
+            servers=['http://example.com'],
+            public_key='public',
+            secret_key='secret',
+            project=1,
+        )
+
+        # test immediate raise of error
+        async_send.side_effect = Exception()
+        client.send_remote('http://example.com/api/store', 'foo')
+        self.assertEquals(client.state.status, client.state.ERROR)
+
+        # test recovery
+        client.send_remote('http://example.com/api/store', 'foo')
+        success_cb = async_send.call_args[0][2]
+        success_cb()
+        self.assertEquals(client.state.status, client.state.ONLINE)
+
+        # test delayed raise of error
+        client.send_remote('http://example.com/api/store', 'foo')
+        failure_cb = async_send.call_args[0][3]
+        failure_cb(Exception())
+        self.assertEquals(client.state.status, client.state.ERROR)
 
     @mock.patch('raven.base.Client.send_remote')
     @mock.patch('raven.base.time.time')
@@ -109,13 +146,15 @@ class ClientTest(TestCase):
         })
         send_remote.assert_called_once_with(
             url='http://example.com',
-            data='eJyrVkrLz1eyUlBKSixSqgUAIJgEVA==',
+            data=six.b('eJyrVkrLz1eyUlBKSixSqgUAIJgEVA=='),
             headers={
                 'User-Agent': 'raven-python/%s' % (raven.VERSION,),
                 'Content-Type': 'application/octet-stream',
-                'X-Sentry-Auth': 'Sentry sentry_timestamp=1328055286.51, '
-                    'sentry_client=raven-python/%s, sentry_version=2.0, sentry_key=public, '
-                    'sentry_secret=secret' % (raven.VERSION,)
+                'X-Sentry-Auth': (
+                    'Sentry sentry_timestamp=1328055286.51, '
+                    'sentry_client=raven-python/%s, sentry_version=2.0, '
+                    'sentry_key=public, '
+                    'sentry_secret=secret' % (raven.VERSION,))
             },
         )
 
@@ -134,7 +173,7 @@ class ClientTest(TestCase):
         })
         send_remote.assert_called_once_with(
             url='http://example.com',
-            data='eJyrVkrLz1eyUlBKSixSqgUAIJgEVA==',
+            data=six.b('eJyrVkrLz1eyUlBKSixSqgUAIJgEVA=='),
             headers={
                 'User-Agent': 'raven-python/%s' % (raven.VERSION,),
                 'Content-Type': 'application/octet-stream',
@@ -150,21 +189,21 @@ class ClientTest(TestCase):
 
     def test_dsn(self):
         client = Client(dsn='http://public:secret@example.com/1')
-        self.assertEquals(client.servers, ['http://example.com/api/store/'])
+        self.assertEquals(client.servers, ['http://example.com/api/1/store/'])
         self.assertEquals(client.project, '1')
         self.assertEquals(client.public_key, 'public')
         self.assertEquals(client.secret_key, 'secret')
 
     def test_dsn_as_first_arg(self):
         client = Client('http://public:secret@example.com/1')
-        self.assertEquals(client.servers, ['http://example.com/api/store/'])
+        self.assertEquals(client.servers, ['http://example.com/api/1/store/'])
         self.assertEquals(client.project, '1')
         self.assertEquals(client.public_key, 'public')
         self.assertEquals(client.secret_key, 'secret')
 
     def test_slug_in_dsn(self):
         client = Client('http://public:secret@example.com/slug-name')
-        self.assertEquals(client.servers, ['http://example.com/api/store/'])
+        self.assertEquals(client.servers, ['http://example.com/api/slug-name/store/'])
         self.assertEquals(client.project, 'slug-name')
         self.assertEquals(client.public_key, 'public')
         self.assertEquals(client.secret_key, 'secret')
@@ -232,7 +271,7 @@ class ClientTest(TestCase):
         self.assertTrue('timestamp' in event)
 
     def test_exception_context_manager(self):
-        cm = self.client.captureExceptions(tags={'foo': 'bar'})
+        cm = self.client.context(tags={'foo': 'bar'})
         try:
             with cm:
                 raise ValueError('foo')
@@ -328,9 +367,15 @@ class ClientTest(TestCase):
 
         self.assertEquals(len(self.client.events), 1)
         event = self.client.events.pop(0)
-        self.assertEquals(event['extra'], {'logger': 'test', 'foo': 'bar'})
+        if six.PY3:
+            expected = {'logger': "'test'", 'foo': "'bar'"}
+        else:
+            expected = {'logger': "u'test'", 'foo': "u'bar'"}
+        self.assertEquals(event['extra'], expected)
 
 
+# TODO: Python 3
+@pytest.mark.skipif(str("six.PY3"))
 class ClientUDPTest(TestCase):
     def setUp(self):
         self.server_socket = socket(AF_INET, SOCK_DGRAM)

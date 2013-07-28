@@ -9,6 +9,7 @@ This document describes configuration options available to Sentry.
 .. toctree::
    :maxdepth: 2
 
+   bottle
    celery
    django
    flask
@@ -19,6 +20,7 @@ This document describes configuration options available to Sentry.
    wsgi
    zerorpc
    zope
+   tornado
 
 
 Configuring the Client

@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 raven.utils.serializer.base
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -5,11 +6,12 @@ raven.utils.serializer.base
 :copyright: (c) 2010-2012 by the Sentry Team, see AUTHORS for more details.
 :license: BSD, see LICENSE for more details.
 """
+from __future__ import absolute_import
 
 import itertools
-from raven.utils.encoding import to_string, to_unicode
+from raven.utils import six
+from raven.utils.encoding import to_unicode
 from raven.utils.serializer.manager import register
-from types import ClassType, TypeType
 from uuid import UUID
 
 __all__ = ('Serializer',)
@@ -49,10 +51,12 @@ class Serializer(object):
         _depth += 1
         if _depth >= max_depth:
             try:
-                value = repr(value)
-            except Exception, e:
+                value = six.text_type(repr(value))
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
                 self.manager.logger.exception(e)
-                return unicode(type(value))
+                return type(value)
         return self.manager.transform(value, max_depth=max_depth, _depth=_depth, **kwargs)
 
 
@@ -61,7 +65,11 @@ class IterableSerializer(Serializer):
 
     def serialize(self, value, **kwargs):
         list_max_length = kwargs.get('list_max_length') or float('inf')
-        return tuple(self.recurse(o, **kwargs) for n, o in itertools.takewhile(lambda x: x[0] < list_max_length, enumerate(value)))
+        return tuple(
+            self.recurse(o, **kwargs)
+            for n, o
+            in itertools.takewhile(lambda x: x[0] < list_max_length, enumerate(value))
+        )
 
 
 class UUIDSerializer(Serializer):
@@ -74,32 +82,52 @@ class UUIDSerializer(Serializer):
 class DictSerializer(Serializer):
     types = (dict,)
 
+    def make_key(self, key):
+        if not isinstance(key, six.string_types):
+            return to_unicode(key)
+        return key
+
     def serialize(self, value, **kwargs):
         list_max_length = kwargs.get('list_max_length') or float('inf')
         return dict(
-            (to_string(k), self.recurse(v, **kwargs))
-            for n, (k, v) in itertools.takewhile(lambda x: x[0] < list_max_length, enumerate(value.iteritems()))
+            (self.make_key(self.recurse(k, **kwargs)), self.recurse(v, **kwargs))
+            for n, (k, v)
+            in itertools.takewhile(lambda x: x[0] < list_max_length, enumerate(six.iteritems(value)))
         )
 
 
 class UnicodeSerializer(Serializer):
-    types = (unicode,)
+    types = (six.text_type,)
 
     def serialize(self, value, **kwargs):
+        # try to return a reasonable string that can be decoded
+        # correctly by the server so it doesnt show up as \uXXX for each
+        # unicode character
+        # e.g. we want the output to be like: "u'רונית מגן'"
         string_max_length = kwargs.get('string_max_length', None)
-        return to_unicode(value)[:string_max_length]
+        return repr(six.text_type('%s')) % (value[:string_max_length],)
 
 
 class StringSerializer(Serializer):
-    types = (str,)
+    types = (six.binary_type,)
 
     def serialize(self, value, **kwargs):
         string_max_length = kwargs.get('string_max_length', None)
-        return to_string(value)[:string_max_length]
+        if six.PY3:
+            return repr(value[:string_max_length])
+
+        try:
+            # Python2 madness: let's try to recover from developer's issues
+            # Try to process the string as if it was a unicode.
+            return "'" + value.decode('utf8')[:string_max_length].encode('utf8') + "'"
+        except UnicodeDecodeError:
+            pass
+
+        return repr(value[:string_max_length])
 
 
 class TypeSerializer(Serializer):
-    types = (ClassType, TypeType,)
+    types = six.class_types
 
     def can(self, value):
         return not super(TypeSerializer, self).can(value) and has_sentry_metadata(value)
@@ -129,11 +157,12 @@ class IntegerSerializer(Serializer):
         return int(value)
 
 
-class LongSerializer(Serializer):
-    types = (long,)
+if not six.PY3:
+    class LongSerializer(Serializer):
+        types = (long,)  # noqa
 
-    def serialize(self, value, **kwargs):
-        return long(value)
+        def serialize(self, value, **kwargs):
+            return long(value)  # noqa
 
 
 register(IterableSerializer)
@@ -145,4 +174,5 @@ register(TypeSerializer)
 register(BooleanSerializer)
 register(FloatSerializer)
 register(IntegerSerializer)
-register(LongSerializer)
+if not six.PY3:
+    register(LongSerializer)

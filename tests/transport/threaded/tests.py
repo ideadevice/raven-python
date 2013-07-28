@@ -1,6 +1,6 @@
 import mock
 import time
-from unittest2 import TestCase
+from raven.utils.testutils import TestCase
 
 from raven.base import Client
 from raven.transport.threaded import ThreadedHTTPTransport
@@ -28,8 +28,8 @@ class ThreadedTransportTest(TestCase):
     def test_does_send(self, send):
         self.client.captureMessage(message='foo')
 
-        time.sleep(0)
+        time.sleep(0.1)
 
         # TODO: This test could be more precise by ensuring it's sending the same params that are sent
         # to the ThreadedHTTPTransport.send() method
-        send.assert_called_once()
+        self.assertEqual(send.call_count, 1)

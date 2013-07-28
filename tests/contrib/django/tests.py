@@ -2,17 +2,20 @@
 
 from __future__ import absolute_import
 from __future__ import with_statement
+from __future__ import unicode_literals
 
 import datetime
 import django
 import logging
 import mock
+import pytest
 import re
+import sys  # NOQA
 from exam import fixture
 from celery.tests.utils import with_eager_tasks
-from StringIO import StringIO
 
 from django.conf import settings
+from django.core.exceptions import SuspiciousOperation
 from django.core.urlresolvers import reverse
 from django.core.signals import got_request_exception
 from django.core.handlers.wsgi import WSGIRequest
@@ -20,7 +23,7 @@ from django.template import TemplateSyntaxError
 from django.test import TestCase
 
 from raven.base import Client
-from raven.contrib.django import DjangoClient
+from raven.contrib.django.client import DjangoClient
 from raven.contrib.django.celery import CeleryClient
 from raven.contrib.django.handlers import SentryHandler
 from raven.contrib.django.models import client, get_client, sentry_exception_handler
@@ -28,11 +31,15 @@ from raven.contrib.django.middleware.wsgi import Sentry
 from raven.contrib.django.templatetags.raven import sentry_public_dsn
 from raven.contrib.django.views import is_valid_origin
 from raven.utils.serializer import transform
+from raven.utils import six
+from raven.utils.six import StringIO
 
 from django.test.client import Client as TestClient, ClientHandler as TestClientHandler
 from .models import TestModel
 
 settings.SENTRY_CLIENT = 'tests.contrib.django.tests.TempStoreClient'
+
+DJANGO_15 = django.VERSION >= (1, 5, 0)
 
 
 def make_request():
@@ -90,12 +97,12 @@ class Settings(object):
         self._orig = {}
 
     def __enter__(self):
-        for k, v in self.overrides.iteritems():
+        for k, v in six.iteritems(self.overrides):
             self._orig[k] = getattr(settings, k, self.NotDefined)
             setattr(settings, k, v)
 
     def __exit__(self, exc_type, exc_value, traceback):
-        for k, v in self._orig.iteritems():
+        for k, v in six.iteritems(self._orig):
             if v is self.NotDefined:
                 delattr(settings, k)
             else:
@@ -143,9 +150,9 @@ class DjangoClientTest(TestCase):
         self.assertTrue('sentry.interfaces.Exception' in event)
         exc = event['sentry.interfaces.Exception']
         self.assertEquals(exc['type'], 'ValueError')
-        self.assertEquals(exc['value'], u"invalid literal for int() with base 10: 'hello'")
+        self.assertEquals(exc['value'], "invalid literal for int() with base 10: 'hello'")
         self.assertEquals(event['level'], logging.ERROR)
-        self.assertEquals(event['message'], u"ValueError: invalid literal for int() with base 10: 'hello'")
+        self.assertEquals(event['message'], "ValueError: invalid literal for int() with base 10: 'hello'")
         self.assertEquals(event['culprit'], 'tests.contrib.django.tests in test_signal_integration')
 
     def test_view_exception(self):
@@ -169,29 +176,46 @@ class DjangoClientTest(TestCase):
 
         self.assertRaises(Exception, self.client.get, reverse('sentry-raise-exc'))
 
-        self.assertEquals(len(self.raven.events), 1)
+        assert len(self.raven.events) == 1
         event = self.raven.events.pop(0)
-        self.assertTrue('sentry.interfaces.User' in event)
-        user_info = event['sentry.interfaces.User']
-        self.assertTrue('is_authenticated' in user_info)
-        self.assertFalse(user_info['is_authenticated'])
-        self.assertFalse('username' in user_info)
-        self.assertFalse('email' in user_info)
+        assert 'sentry.interfaces.User' not in event
 
-        self.assertTrue(self.client.login(username='admin', password='admin'))
+        assert self.client.login(username='admin', password='admin')
 
         self.assertRaises(Exception, self.client.get, reverse('sentry-raise-exc'))
 
         self.assertEquals(len(self.raven.events), 1)
         event = self.raven.events.pop(0)
-        self.assertTrue('sentry.interfaces.User' in event)
+        assert 'sentry.interfaces.User' in event
         user_info = event['sentry.interfaces.User']
-        self.assertTrue('is_authenticated' in user_info)
-        self.assertTrue(user_info['is_authenticated'])
-        self.assertTrue('username' in user_info)
-        self.assertEquals(user_info['username'], 'admin')
-        self.assertTrue('email' in user_info)
-        self.assertEquals(user_info['email'], 'admin@example.com')
+        assert user_info == {
+            'username': user.username,
+            'id': user.id,
+            'email': user.email,
+        }
+
+    @pytest.mark.skipif(str('not DJANGO_15'))
+    def test_get_user_info_abstract_user(self):
+        from django.db import models
+        from django.contrib.auth.models import AbstractBaseUser
+
+        class MyUser(AbstractBaseUser):
+            USERNAME_FIELD = 'username'
+
+            username = models.CharField(max_length=32)
+            email = models.EmailField()
+
+        user = MyUser(
+            username='admin',
+            email='admin@example.com',
+            id=1,
+        )
+        user_info = self.raven.get_user_info(user)
+        assert user_info == {
+            'username': user.username,
+            'id': user.id,
+            'email': user.email,
+        }
 
     def test_request_middleware_exception(self):
         with Settings(MIDDLEWARE_CLASSES=['tests.contrib.django.middleware.BrokenRequestMiddleware']):
@@ -309,6 +333,8 @@ class DjangoClientTest(TestCase):
     #     self.assertEquals(event['culprit'], 'tests.contrib.django.views in logging_request_exc')
     #     self.assertEquals(event['data']['META']['REMOTE_ADDR'], '127.0.0.1')
 
+    # TODO: Python bug #10805
+    @pytest.mark.skipif(str('six.PY3'))
     def test_record_none_exc_info(self):
         # sys.exc_info can return (None, None, None) if no exception is being
         # handled anywhere on the stack. See:
@@ -327,7 +353,6 @@ class DjangoClientTest(TestCase):
 
         self.assertEquals(len(self.raven.events), 1)
         event = self.raven.events.pop(0)
-
         self.assertEquals(event['message'], 'test')
 
     def test_404_middleware(self):
@@ -343,7 +368,7 @@ class DjangoClientTest(TestCase):
 
             self.assertTrue('sentry.interfaces.Http' in event)
             http = event['sentry.interfaces.Http']
-            self.assertEquals(http['url'], u'http://testserver/non-existant-page')
+            self.assertEquals(http['url'], 'http://testserver/non-existant-page')
             self.assertEquals(http['method'], 'GET')
             self.assertEquals(http['query_string'], '')
             self.assertEquals(http['data'], None)
@@ -368,7 +393,7 @@ class DjangoClientTest(TestCase):
             self.assertTrue('X-Sentry-ID' in headers)
             self.assertEquals(len(self.raven.events), 1)
             event = self.raven.events.pop(0)
-            self.assertEquals('$'.join([event['event_id'], event['checksum']]), headers['X-Sentry-ID'])
+            assert event['event_id'] == headers['X-Sentry-ID']
 
     def test_get_client(self):
         self.assertEquals(get_client(), get_client())
@@ -447,7 +472,7 @@ class DjangoClientTest(TestCase):
 
         tags = event['tags']
         assert 'site' in event['tags']
-        assert tags['site'] == u'example.com'
+        assert tags['site'] == 'example.com'
 
     def test_adds_site_to_tags_fallback(self):
         with Settings(SITE_ID=12345):  # nonexistant site, should fallback to SITE_ID
@@ -471,15 +496,25 @@ class DjangoClientTest(TestCase):
         assert 'site' in event['tags']
         assert tags['site'] == 'FOO'
 
+    @mock.patch.object(WSGIRequest, 'build_absolute_uri')
+    def test_suspicious_operation_in_build_absolute_uri(self, build_absolute_uri):
+        build_absolute_uri.side_effect = SuspiciousOperation()
+        request = make_request()
+        request.META['HTTP_HOST'] = 'example.com'
+        result = self.raven.get_data_from_request(request)
+        build_absolute_uri.assert_called_once_with()
+        assert 'sentry.interfaces.Http' in result
+        assert result['sentry.interfaces.Http']['url'] == 'http://example.com/'
+
 
 class DjangoTemplateTagTest(TestCase):
     @mock.patch('raven.contrib.django.DjangoClient.get_public_dsn')
     def test_sentry_public_dsn_no_args(self, get_public_dsn):
         sentry_public_dsn()
-        get_public_dsn.assert_called_once_with()
+        get_public_dsn.assert_called_once_with(None)
 
     @mock.patch('raven.contrib.django.DjangoClient.get_public_dsn')
-    def test_sentry_public_dsn_no_args(self, get_public_dsn):
+    def test_sentry_public_dsn_with_https(self, get_public_dsn):
         sentry_public_dsn('https')
         get_public_dsn.assert_called_once_with('https')
 
@@ -660,7 +695,8 @@ class ReportViewTest(TestCase):
     @mock.patch('raven.contrib.django.views.is_valid_origin', mock.Mock(return_value=True))
     def test_sends_x_sentry_auth_header(self):
         resp = self.client.post(self.path, HTTP_ORIGIN='http://example.com',
-            HTTP_X_SENTRY_AUTH='Sentry foo/bar', data='{}', content_type='application/octet-stream')
+            HTTP_X_SENTRY_AUTH='Sentry foo/bar', data='{}',
+            content_type='application/octet-stream')
         self.assertEquals(resp.status_code, 200)
         event = client.events.pop(0)
         self.assertEquals(event, {'auth_header': 'Sentry foo/bar'})
@@ -670,38 +706,42 @@ class PromiseSerializerTestCase(TestCase):
     def test_basic(self):
         from django.utils.functional import lazy
 
-        obj = lazy(lambda: 'bar', str)()
+        obj = lazy(lambda: 'bar', six.text_type)()
         res = transform(obj)
-        self.assertEquals(res, 'bar')
+        expected = "'bar'" if six.PY3 else "u'bar'"
+        self.assertEquals(res, expected)
 
     def test_handles_gettext_lazy(self):
         from django.utils.functional import lazy
 
         def fake_gettext(to_translate):
-            return u'Igpay Atinlay'
+            return 'Igpay Atinlay'
 
-        fake_gettext_lazy = lazy(fake_gettext, str)
+        fake_gettext_lazy = lazy(fake_gettext, six.text_type)
 
         result = transform(fake_gettext_lazy("something"))
-        self.assertTrue(isinstance(result, basestring))
-        self.assertEquals(result, u'Igpay Atinlay')
+        self.assertTrue(isinstance(result, six.string_types))
+        expected = "'Igpay Atinlay'" if six.PY3 else "u'Igpay Atinlay'"
+        self.assertEquals(result, expected)
 
 
-class QuerySetSerializerTestCase(TestCase):
-    def test_model_instance(self):
+class ModelInstanceSerializerTestCase(TestCase):
+    def test_basic(self):
         instance = TestModel()
 
         result = transform(instance)
-        self.assertTrue(isinstance(result, basestring))
-        self.assertEquals(result, u'<TestModel: TestModel object>')
+        self.assertTrue(isinstance(result, six.string_types))
+        self.assertEquals(result, '<TestModel: TestModel object>')
 
+
+class QuerySetSerializerTestCase(TestCase):
     def test_basic(self):
         from django.db.models.query import QuerySet
         obj = QuerySet(model=TestModel)
 
         result = transform(obj)
-        self.assertTrue(isinstance(result, basestring))
-        self.assertEquals(result, u'<QuerySet: model=TestModel>')
+        self.assertTrue(isinstance(result, six.string_types))
+        self.assertEquals(result, '<QuerySet: model=TestModel>')
 
 
 class SentryExceptionHandlerTest(TestCase):
@@ -727,6 +767,32 @@ class SentryExceptionHandlerTest(TestCase):
     def test_does_exclude_filtered_types(self, get_option, exc_info, captureException):
         exc_info.return_value = self.exc_info
         get_option.return_value = ['ValueError']
+
+        sentry_exception_handler(request=self.request)
+
+        assert not captureException.called
+
+    @mock.patch.object(TempStoreClient, 'captureException')
+    @mock.patch('sys.exc_info')
+    @mock.patch('raven.contrib.django.models.get_option')
+    def test_ignore_exceptions_with_expression_match(self, get_option, exc_info, captureException):
+        exc_info.return_value = self.exc_info
+        get_option.return_value = ['builtins.*']
+        if not six.PY3:
+            get_option.return_value = ['exceptions.*']
+
+        sentry_exception_handler(request=self.request)
+
+        assert not captureException.called
+
+    @mock.patch.object(TempStoreClient, 'captureException')
+    @mock.patch('sys.exc_info')
+    @mock.patch('raven.contrib.django.models.get_option')
+    def test_ignore_exceptions_with_module_match(self, get_option, exc_info, captureException):
+        exc_info.return_value = self.exc_info
+        get_option.return_value = ['builtins.ValueError']
+        if not six.PY3:
+            get_option.return_value = ['exceptions.ValueError']
 
         sentry_exception_handler(request=self.request)
 

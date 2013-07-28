@@ -5,10 +5,11 @@ raven.transport.builtins
 :copyright: (c) 2010-2012 by the Sentry Team, see AUTHORS for more details.
 :license: BSD, see LICENSE for more details.
 """
+from __future__ import absolute_import
 
 import logging
 import sys
-import urllib2
+from raven.utils import compat
 
 try:
     # Google App Engine blacklists parts of the socket module, this will prevent
@@ -58,11 +59,15 @@ class Transport(object):
     """
     All transport implementations need to subclass this class
 
-    You must implement a send method and the compute_scope method.
+    You must implement a send method (or an async_send method if
+    sub-classing AsyncTransport) and the compute_scope method.
 
     Please see the HTTPTransport class for an example of a
     compute_scope implementation.
     """
+
+    async = False
+
     def check_scheme(self, url):
         if url.scheme not in self.scheme:
             raise InvalidScheme()
@@ -79,6 +84,26 @@ class Transport(object):
         You need to override this to compute the SENTRY specific
         additions to the variable scope.  See the HTTPTransport for an
         example.
+        """
+        raise NotImplementedError
+
+
+class AsyncTransport(Transport):
+    """
+    All asynchronous transport implementations should subclass this
+    class.
+
+    You must implement a async_send method (and the compute_scope
+    method as describe on the base Transport class).
+    """
+
+    async = True
+
+    def async_send(self, data, headers, success_cb, error_cb):
+        """
+        Override this method for asynchronous transports. Call
+        `success_cb()` if the send succeeds or `error_cb(exception)`
+        if the send fails.
         """
         raise NotImplementedError
 
@@ -113,7 +138,8 @@ class BaseUDPTransport(Transport):
         netloc = url.hostname
         netloc += ':%s' % url.port
 
-        server = '%s://%s%s/api/store/' % (url.scheme, netloc, path)
+        server = '%s://%s%s/api/%s/store/' % (
+            url.scheme, netloc, path, project)
         scope.update({
             'SENTRY_SERVERS': [server],
             'SENTRY_PROJECT': project,
@@ -163,12 +189,12 @@ class HTTPTransport(Transport):
         """
         Sends a request to a remote webserver using HTTP POST.
         """
-        req = urllib2.Request(self._url, headers=headers)
+        req = compat.Request(self._url, headers=headers)
 
         if sys.version_info < (2, 6):
-            response = urllib2.urlopen(req, data).read()
+            response = compat.urlopen(req, data).read()
         else:
-            response = urllib2.urlopen(req, data, self.timeout).read()
+            response = compat.urlopen(req, data, self.timeout).read()
         return response
 
     def compute_scope(self, url, scope):
@@ -187,7 +213,8 @@ class HTTPTransport(Transport):
         if not all([netloc, project, url.username, url.password]):
             raise ValueError('Invalid Sentry DSN: %r' % url.geturl())
 
-        server = '%s://%s%s/api/store/' % (url.scheme, netloc, path)
+        server = '%s://%s%s/api/%s/store/' % (
+            url.scheme, netloc, path, project)
         scope.update({
             'SENTRY_SERVERS': [server],
             'SENTRY_PROJECT': project,
@@ -197,7 +224,7 @@ class HTTPTransport(Transport):
         return scope
 
 
-class GeventedHTTPTransport(HTTPTransport):
+class GeventedHTTPTransport(AsyncTransport, HTTPTransport):
 
     scheme = ['gevent+http', 'gevent+https']
 
@@ -211,20 +238,26 @@ class GeventedHTTPTransport(HTTPTransport):
         # remove the gevent+ from the protocol, as it is not a real protocol
         self._url = self._url.split('+', 1)[-1]
 
-    def send(self, data, headers):
+    def async_send(self, data, headers, success_cb, failure_cb):
         """
         Spawn an async request to a remote webserver.
         """
         # this can be optimized by making a custom self.send that does not
         # read the response since we don't use it.
         self._lock.acquire()
-        return gevent.spawn(super(GeventedHTTPTransport, self).send, data, headers).link(self._done, self)
+        return gevent.spawn(
+            super(GeventedHTTPTransport, self).send, data, headers
+        ).link(lambda x: self._done(x, success_cb, failure_cb))
 
-    def _done(self, *args):
+    def _done(self, greenlet, success_cb, failure_cb, *args):
         self._lock.release()
+        if greenlet.successful():
+            success_cb()
+        else:
+            failure_cb(greenlet.value)
 
 
-class TwistedHTTPTransport(HTTPTransport):
+class TwistedHTTPTransport(AsyncTransport, HTTPTransport):
 
     scheme = ['twisted+http', 'twisted+https']
 
@@ -238,10 +271,11 @@ class TwistedHTTPTransport(HTTPTransport):
         # remove the twisted+ from the protocol, as it is not a real protocol
         self._url = self._url.split('+', 1)[-1]
 
-    def send(self, data, headers):
-        d = twisted.web.client.getPage(self._url, method='POST', postdata=data, headers=headers)
-        d.addErrback(lambda f: self.logger.error(
-            'Cannot send error to sentry: %s', f.getTraceback()))
+    def async_send(self, data, headers, success_cb, failure_cb):
+        d = twisted.web.client.getPage(self._url, method='POST', postdata=data,
+                                       headers=headers)
+        d.addCallback(lambda r: success_cb())
+        d.addErrback(lambda f: failure_cb(f.value))
 
 
 class TwistedUDPTransport(BaseUDPTransport):
@@ -304,7 +338,7 @@ class EventletHTTPTransport(HTTPTransport):
                 response = eventlet_urllib2.urlopen(req, payload[0],
                                                     self.timeout).read()
             return response
-        except Exception, err:
+        except Exception as err:
             return err
 
     def send(self, data, headers):

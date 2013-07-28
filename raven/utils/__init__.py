@@ -5,7 +5,9 @@ raven.utils
 :copyright: (c) 2010-2012 by the Sentry Team, see AUTHORS for more details.
 :license: BSD, see LICENSE for more details.
 """
+from __future__ import absolute_import
 
+from raven.utils import six
 import logging
 try:
     import pkg_resources
@@ -29,7 +31,7 @@ def varmap(func, var, context=None, name=None):
         return func(name, '<...>')
     context[objid] = 1
     if isinstance(var, dict):
-        ret = dict((k, varmap(func, v, context, k)) for k, v in var.iteritems())
+        ret = dict((k, varmap(func, v, context, k)) for k, v in six.iteritems(var))
     elif isinstance(var, (list, tuple)):
         ret = [varmap(func, f, context, name) for f in var]
     else:
@@ -65,7 +67,7 @@ def get_version_from_app(module_name, app):
     if isinstance(version, (list, tuple)):
         version = '.'.join(str(o) for o in version)
 
-    return version
+    return str(version)
 
 
 def get_versions(module_list=None):
@@ -75,7 +77,7 @@ def get_versions(module_list=None):
     ext_module_list = set()
     for m in module_list:
         parts = m.split('.')
-        ext_module_list.update('.'.join(parts[:idx]) for idx in xrange(1, len(parts) + 1))
+        ext_module_list.update('.'.join(parts[:idx]) for idx in range(1, len(parts) + 1))
 
     versions = {}
     for module_name in ext_module_list:
@@ -92,7 +94,7 @@ def get_versions(module_list=None):
 
             try:
                 version = get_version_from_app(module_name, app)
-            except Exception, e:
+            except Exception as e:
                 logger.exception(e)
                 version = None
 
@@ -116,3 +118,29 @@ def get_auth_header(protocol, timestamp, client, api_key, api_secret=None, **kwa
         header.append(('sentry_secret', api_secret))
 
     return 'Sentry %s' % ', '.join('%s=%s' % (k, v) for k, v in header)
+
+
+class memoize(object):
+    """
+    Memoize the result of a property call.
+
+    >>> class A(object):
+    >>>     @memoize
+    >>>     def func(self):
+    >>>         return 'foo'
+    """
+
+    def __init__(self, func):
+        self.__name__ = func.__name__
+        self.__module__ = func.__module__
+        self.__doc__ = func.__doc__
+        self.func = func
+
+    def __get__(self, obj, type=None):
+        if obj is None:
+            return self
+        d, n = vars(obj), self.__name__
+        if n not in d:
+            value = self.func(obj)
+            d[n] = value
+        return value

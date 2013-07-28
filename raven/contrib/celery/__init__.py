@@ -5,6 +5,7 @@ raven.contrib.celery
 :copyright: (c) 2010-2012 by the Sentry Team, see AUTHORS for more details.
 :license: BSD, see LICENSE for more details.
 """
+from __future__ import absolute_import
 
 import logging
 try:
@@ -32,21 +33,18 @@ class CeleryClient(CeleryMixin, Client):
 
 class CeleryFilter(logging.Filter):
     def filter(self, record):
-        return record.funcName not in ('_log_error',)
+        # Context is fixed in Celery 3.x so use internal flag instead
+        extra_data = getattr(record, 'data', {})
+        if not isinstance(extra_data, dict):
+            return record.funcName != '_log_error'
+        # Fallback to funcName for Celery 2.5
+        return extra_data.get('internal', record.funcName != '_log_error')
 
 
 def register_signal(client):
-    def process_failure_signal(sender, task_id, exception, args, kwargs,
-                               traceback, einfo, **kw):
-        if hasattr(einfo, 'exc_info'):
-            # for Celery 2.4 or later
-            exc_info = einfo.exc_info
-        else:
-            # for Celery before 2.4
-            exc_info = (type(exception), exception, traceback)
-
+    def process_failure_signal(sender, task_id, args, kwargs, **kw):
+        # This signal is fired inside the stack so let raven do its magic
         client.captureException(
-            exc_info=exc_info,
             extra={
                 'task_id': task_id,
                 'task': sender,
@@ -73,8 +71,7 @@ def register_logger_signal(client, logger=None):
         # If one is found, we do not attempt to install another one.
         for h in logger.handlers:
             if type(h) == SentryHandler:
-                if not any(type(f) == CeleryFilter for f in h.filters):
-                    h.addFilter(filter_)
+                h.addFilter(filter_)
                 return False
 
         logger.addHandler(handler)

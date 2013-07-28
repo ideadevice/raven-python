@@ -5,10 +5,12 @@ raven.core.processors
 :copyright: (c) 2010-2012 by the Sentry Team, see AUTHORS for more details.
 :license: BSD, see LICENSE for more details.
 """
+from __future__ import absolute_import
 
 import re
 
 from raven.utils import varmap
+from raven.utils import six
 
 
 class Processor(object):
@@ -54,14 +56,14 @@ class SanitizePasswordsProcessor(Processor):
     card numbers in frames, http, and basic extra data.
     """
     MASK = '*' * 8
-    FIELDS = frozenset(['password', 'secret', 'passwd'])
+    FIELDS = frozenset(['password', 'secret', 'passwd', 'authorization'])
     VALUES_RE = re.compile(r'^(?:\d[ -]*?){13,16}$')
 
     def sanitize(self, key, value):
         if value is None:
             return
 
-        if isinstance(value, basestring) and self.VALUES_RE.match(value):
+        if isinstance(value, six.string_types) and self.VALUES_RE.match(value):
             return self.MASK
 
         if not key:  # key can be a NoneType
@@ -87,7 +89,7 @@ class SanitizePasswordsProcessor(Processor):
             if n not in data:
                 continue
 
-            if isinstance(data[n], basestring) and '=' in data[n]:
+            if isinstance(data[n], six.string_types) and '=' in data[n]:
                 # at this point we've assumed it's a standard HTTP query
                 querybits = []
                 for bit in data[n].split('&'):

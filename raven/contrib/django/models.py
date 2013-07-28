@@ -9,11 +9,14 @@ Acts as an implicit hook for Django installs.
 """
 
 from __future__ import absolute_import
+from __future__ import unicode_literals
 
 from hashlib import md5
 import logging
 import sys
 import warnings
+
+from raven.utils import six
 
 from django.conf import settings as django_settings
 
@@ -22,12 +25,10 @@ logger = logging.getLogger('sentry.errors.client')
 
 def get_installed_apps():
     """
-    Generate a list of modules in settings.INSTALLED_APPS.
+    Modules in settings.INSTALLED_APPS as a set.
     """
-    out = set()
-    for app in django_settings.INSTALLED_APPS:
-        out.add(app)
-    return out
+    return set(django_settings.INSTALLED_APPS)
+
 
 _client = (None, None)
 
@@ -56,7 +57,8 @@ class ProxyClient(object):
     __ne__ = lambda x, o: get_client() != o
     __gt__ = lambda x, o: get_client() > o
     __ge__ = lambda x, o: get_client() >= o
-    __cmp__ = lambda x, o: cmp(get_client(), o)
+    if not six.PY3:
+        __cmp__ = lambda x, o: cmp(get_client(), o)  # NOQA
     __hash__ = lambda x: hash(get_client())
     # attributes are currently not callable
     # __call__ = lambda x, *a, **kw: get_client()(*a, **kw)
@@ -86,10 +88,11 @@ class ProxyClient(object):
     __invert__ = lambda x: ~(get_client())
     __complex__ = lambda x: complex(get_client())
     __int__ = lambda x: int(get_client())
-    __long__ = lambda x: long(get_client())
+    if not six.PY3:
+        __long__ = lambda x: long(get_client())  # NOQA
     __float__ = lambda x: float(get_client())
-    __str__ = lambda x: str(get_client())
-    __unicode__ = lambda x: unicode(get_client())
+    __str__ = lambda x: six.binary_type(get_client())
+    __unicode__ = lambda x: six.text_type(get_client())
     __oct__ = lambda x: oct(get_client())
     __hex__ = lambda x: hex(get_client())
     __index__ = lambda x: get_client().__index__()
@@ -125,7 +128,7 @@ def get_client(client=None):
         options.setdefault('timeout', ga('TIMEOUT'))
         options.setdefault('name', ga('NAME'))
         options.setdefault('auto_log_stacks', ga('AUTO_LOG_STACKS'))
-        options.setdefault('key', ga('KEY', md5(django_settings.SECRET_KEY).hexdigest()))
+        options.setdefault('key', ga('KEY', md5(django_settings.SECRET_KEY.encode('utf8')).hexdigest()))
         options.setdefault('string_max_length', ga('MAX_LENGTH_STRING'))
         options.setdefault('list_max_length', ga('MAX_LENGTH_LIST'))
         options.setdefault('site', ga('SITE'))
@@ -136,6 +139,8 @@ def get_client(client=None):
         options.setdefault('dsn', ga('DSN'))
         options.setdefault('context', ga('CONTEXT'))
 
+        class_name = str(class_name)
+
         instance = getattr(__import__(module, {}, {}, class_name), class_name)(**options)
         if not tmp_client:
             _client = (client, instance)
@@ -144,19 +149,24 @@ def get_client(client=None):
 
 
 def sentry_exception_handler(request=None, **kwargs):
-    exc_info = sys.exc_info()
+    exc_type = sys.exc_info()[0]
 
-    if exc_info[0].__name__ in get_option('IGNORE_EXCEPTIONS', tuple()):
-        logger.info('Not capturing exception due to filters: %s', exc_info[0], exc_info=exc_info)
+    exclusions = set(get_option('IGNORE_EXCEPTIONS', ()))
+
+    exc_name = '%s.%s' % (exc_type.__module__, exc_type.__name__)
+    if exc_type.__name__ in exclusions or exc_name in exclusions or any(exc_name.startswith(e[:-1]) for e in exclusions if e.endswith('*')):
+        logger.info(
+            'Not capturing exception due to filters: %s', exc_type,
+            exc_info=sys.exc_info())
         return
 
     try:
-        client.captureException(exc_info=exc_info, request=request)
-    except Exception, exc:
+        client.captureException(exc_info=sys.exc_info(), request=request)
+    except Exception as exc:
         try:
-            logger.exception(u'Unable to process log entry: %s' % (exc,))
-        except Exception, exc:
-            warnings.warn(u'Unable to process log entry: %s' % (exc,))
+            logger.exception('Unable to process log entry: %s' % (exc,))
+        except Exception as exc:
+            warnings.warn('Unable to process log entry: %s' % (exc,))
 
 
 def register_handlers():
@@ -181,17 +191,22 @@ def register_handlers():
 
     # If Celery is installed, register a signal handler
     if 'djcelery' in django_settings.INSTALLED_APPS:
-        from raven.contrib.celery import register_signal, register_logger_signal
-
         try:
-            register_signal(client)
-        except Exception:
-            logger.exception('Failed installing error handling for Celery')
+            # Celery < 2.5? is not supported
+            from raven.contrib.celery import (
+                register_signal, register_logger_signal)
+        except ImportError:
+            logger.exception('Failed to install Celery error handler')
+        else:
+            try:
+                register_signal(client)
+            except Exception:
+                logger.exception('Failed to install Celery error handler')
 
-        try:
-            register_logger_signal(client)
-        except Exception:
-            logger.exception('Failed installing logging handler for Celery')
+            try:
+                register_logger_signal(client)
+            except Exception:
+                logger.exception('Failed to install Celery error handler')
 
 
 def register_serializers():
@@ -199,6 +214,6 @@ def register_serializers():
     import raven.contrib.django.serializers  # NOQA
 
 if ('raven.contrib.django' in django_settings.INSTALLED_APPS
-      or 'raven.contrib.django.raven_compat' in django_settings.INSTALLED_APPS):
+        or 'raven.contrib.django.raven_compat' in django_settings.INSTALLED_APPS):
     register_handlers()
     register_serializers()

@@ -14,13 +14,14 @@ import traceback
 
 from raven.base import Client
 from raven.utils.encoding import to_string
+from raven.utils import six
 
 
 class SentryHandler(logbook.Handler):
     def __init__(self, *args, **kwargs):
         if len(args) == 1:
             arg = args[0]
-            if isinstance(arg, basestring):
+            if isinstance(arg, six.string_types):
                 self.client = kwargs.pop('client_cls', Client)(dsn=arg)
             elif isinstance(arg, Client):
                 self.client = arg
@@ -40,7 +41,7 @@ class SentryHandler(logbook.Handler):
     def emit(self, record):
         try:
             # Avoid typical config issues by overriding loggers behavior
-            if record.channel.startswith('sentry.errors'):
+            if record.channel.startswith(('sentry.errors', 'raven')):
                 print >> sys.stderr, to_string(self.format(record))
                 return
 
@@ -59,11 +60,18 @@ class SentryHandler(logbook.Handler):
         data = {
             'level': logbook.get_level_name(record.level).lower(),
             'logger': record.channel,
-            'message': self.format(record),
         }
 
         event_type = 'raven.events.Message'
-        handler_kwargs = {'message': record.msg, 'params': record.args}
+
+        handler_kwargs = {
+            'message': record.msg,
+            'params': record.args,
+            'formatted': self.format(record),
+        }
+
+        if 'tags' in record.kwargs:
+            handler_kwargs['tags'] = record.kwargs['tags']
 
         # If there's no exception being processed, exc_info may be a 3-tuple of None
         # http://docs.python.org/library/sys.html#sys.exc_info
@@ -74,8 +82,17 @@ class SentryHandler(logbook.Handler):
             event_type = 'raven.events.Exception'
             handler_kwargs = {'exc_info': record.exc_info}
 
+        extra = {
+            'lineno': record.lineno,
+            'filename': record.filename,
+            'function': record.func_name,
+            'process': record.process,
+            'process_name': record.process_name,
+        }
+        extra.update(record.extra)
+
         return self.client.capture(event_type,
             data=data,
-            extra=record.extra,
+            extra=extra,
             **handler_kwargs
         )

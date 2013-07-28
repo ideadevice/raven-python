@@ -5,12 +5,12 @@ raven.events
 :copyright: (c) 2010-2012 by the Sentry Team, see AUTHORS for more details.
 :license: BSD, see LICENSE for more details.
 """
+from __future__ import absolute_import
 
 import logging
 import sys
 
-from raven.utils import varmap
-from raven.utils.encoding import shorten, to_unicode
+from raven.utils.encoding import to_unicode
 from raven.utils.stacks import get_stack_info, iter_traceback_frames
 
 __all__ = ('BaseEvent', 'Exception', 'Message', 'Query')
@@ -27,6 +27,9 @@ class BaseEvent(object):
     def capture(self, **kwargs):
         return {
         }
+
+    def transform(self, value):
+        return self.client.transform(value)
 
 
 class Exception(BaseEvent):
@@ -45,55 +48,41 @@ class Exception(BaseEvent):
             return '%s: %s' % (exc['type'], exc['value'])
         return exc['type']
 
-    def get_hash(self, data):
-        exc = data['sentry.interfaces.Exception']
-        output = [exc['type']]
-        for frame in data['sentry.interfaces.Stacktrace']['frames']:
-            output.append(frame['module'])
-            output.append(frame.get('context_line', frame['function']))
-        return output
-
     def capture(self, exc_info=None, **kwargs):
-        new_exc_info = False
         if not exc_info or exc_info is True:
-            new_exc_info = True
             exc_info = sys.exc_info()
 
         if not exc_info:
             raise ValueError('No exception found')
 
-        try:
-            exc_type, exc_value, exc_traceback = exc_info
+        exc_type, exc_value, exc_traceback = exc_info
 
-            frames = varmap(lambda k, v: shorten(v,
-                string_length=self.client.string_max_length, list_length=self.client.list_max_length),
-            get_stack_info(iter_traceback_frames(exc_traceback),
-                list_max_length=self.client.list_max_length,
-                string_max_length=self.client.string_max_length))
+        try:
+            frames = get_stack_info(
+                iter_traceback_frames(exc_traceback),
+                transformer=self.transform)
 
             exc_module = getattr(exc_type, '__module__', None)
             if exc_module:
                 exc_module = str(exc_module)
             exc_type = getattr(exc_type, '__name__', '<unknown>')
-        finally:
-            if new_exc_info:
-                try:
-                    del exc_info
-                    del exc_traceback
-                except Exception, e:
-                    self.logger.exception(e)
 
-        return {
-            'level': logging.ERROR,
-            'sentry.interfaces.Exception': {
-                'value': to_unicode(exc_value),
-                'type': str(exc_type),
-                'module': exc_module,
-            },
-            'sentry.interfaces.Stacktrace': {
-                'frames': frames
-            },
-        }
+            return {
+                'level': kwargs.get('level', logging.ERROR),
+                'sentry.interfaces.Exception': {
+                    'value': to_unicode(exc_value),
+                    'type': str(exc_type),
+                    'module': to_unicode(exc_module),
+                },
+                'sentry.interfaces.Stacktrace': {
+                    'frames': frames
+                },
+            }
+        finally:
+            try:
+                del exc_type, exc_value, exc_traceback
+            except Exception as e:
+                self.logger.exception(e)
 
 
 class Message(BaseEvent):
@@ -103,24 +92,16 @@ class Message(BaseEvent):
     - message: 'My message from %s about %s'
     - params: ('foo', 'bar')
     """
-
-    def to_string(self, data):
-        msg = data['sentry.interfaces.Message']
-        if msg.get('params'):
-            return msg['message'] % msg['params']
-        return msg['message']
-
-    def get_hash(self, data):
-        msg = data['sentry.interfaces.Message']
-        return [msg['message']]
-
-    def capture(self, message, params=(), **kwargs):
+    def capture(self, message, params=(), formatted=None, **kwargs):
+        message = to_unicode(message)
         data = {
             'sentry.interfaces.Message': {
                 'message': message,
-                'params': params,
-            }
+                'params': self.transform(params),
+            },
         }
+        if 'message' not in data:
+            data['message'] = formatted or message
         return data
 
 
@@ -135,14 +116,10 @@ class Query(BaseEvent):
         sql = data['sentry.interfaces.Query']
         return sql['query']
 
-    def get_hash(self, data):
-        sql = data['sentry.interfaces.Query']
-        return [sql['query'], sql['engine']]
-
     def capture(self, query, engine, **kwargs):
         return {
             'sentry.interfaces.Query': {
-                'query': query,
-                'engine': engine,
+                'query': to_unicode(query),
+                'engine': str(engine),
             }
         }

@@ -30,6 +30,8 @@ def make_client(client_cls, app, dsn=None):
         project=app.config.get('SENTRY_PROJECT'),
         site=app.config.get('SENTRY_SITE_NAME'),
         processors=app.config.get('SENTRY_PROCESSORS'),
+        string_max_length=app.config.get('SENTRY_MAX_LENGTH_STRING'),
+        list_max_length=app.config.get('SENTRY_MAX_LENGTH_LIST'),
     )
 
 
@@ -78,15 +80,20 @@ class Sentry(object):
         if not self.client:
             return
 
-        self.client.captureException(exc_info=kwargs.get('exc_info'),
+        self.client.captureException(
+            exc_info=kwargs.get('exc_info'),
             data=get_data_from_request(request),
             extra={
                 'app': self.app,
             },
         )
 
-    def init_app(self, app):
+    def init_app(self, app, dsn=None):
         self.app = app
+
+        if dsn is not None:
+            self.dsn = dsn
+
         if not self.client:
             self.client = make_client(self.client_cls, app, self.dsn)
 
@@ -103,12 +110,20 @@ class Sentry(object):
         assert self.client, 'captureException called before application configured'
         data = kwargs.get('data')
         if data is None:
-            kwargs['data'] = get_data_from_request(request)
+            try:
+                kwargs['data'] = get_data_from_request(request)
+            except RuntimeError:
+                # app is probably not configured yet
+                pass
         return self.client.captureException(*args, **kwargs)
 
     def captureMessage(self, *args, **kwargs):
         assert self.client, 'captureMessage called before application configured'
         data = kwargs.get('data')
         if data is None:
-            kwargs['data'] = get_data_from_request(request)
+            try:
+                kwargs['data'] = get_data_from_request(request)
+            except RuntimeError:
+                # app is probably not configured yet
+                pass
         return self.client.captureMessage(*args, **kwargs)

@@ -5,6 +5,7 @@ raven.utils.stacks
 :copyright: (c) 2010-2012 by the Sentry Team, see AUTHORS for more details.
 :license: BSD, see LICENSE for more details.
 """
+from __future__ import absolute_import
 
 import inspect
 import re
@@ -12,6 +13,8 @@ import sys
 import warnings
 
 from raven.utils.serializer import transform
+from raven.utils import six
+
 
 _coding_re = re.compile(r'coding[:=]\s*([-\w.]+)')
 
@@ -45,36 +48,37 @@ def get_lines_from_file(filename, lineno, context_lines, loader=None, module_nam
             source = source.splitlines()
     if source is None:
         try:
-            f = open(filename)
+            f = open(filename, 'rb')
             try:
                 source = f.readlines()
             finally:
                 f.close()
         except (OSError, IOError):
             pass
-    if source is None:
-        return None, [], None
 
-    encoding = 'ascii'
-    for line in source[:2]:
-        # File coding may be specified. Match pattern from PEP-263
-        # (http://www.python.org/dev/peps/pep-0263/)
-        match = _coding_re.search(line)
-        if match:
-            encoding = match.group(1)
-            break
-    source = [unicode(sline, encoding, 'replace') for sline in source]
+        if source is None:
+            return None, None, None
+
+        encoding = 'utf8'
+        for line in source[:2]:
+            # File coding may be specified. Match pattern from PEP-263
+            # (http://www.python.org/dev/peps/pep-0263/)
+            match = _coding_re.search(line.decode('utf8'))  # let's assume utf8
+            if match:
+                encoding = match.group(1)
+                break
+        source = [six.text_type(sline, encoding, 'replace') for sline in source]
 
     lower_bound = max(0, lineno - context_lines)
     upper_bound = min(lineno + 1 + context_lines, len(source))
 
     try:
-        pre_context = [line.strip('\n') for line in source[lower_bound:lineno]]
-        context_line = source[lineno].strip('\n')
-        post_context = [line.strip('\n') for line in source[(lineno + 1):upper_bound]]
+        pre_context = [line.strip('\r\n') for line in source[lower_bound:lineno]]
+        context_line = source[lineno].strip('\r\n')
+        post_context = [line.strip('\r\n') for line in source[(lineno + 1):upper_bound]]
     except IndexError:
         # the file may have changed since it was loaded into memory
-        return None, [], None
+        return None, None, None
 
     return pre_context, context_line, post_context
 
@@ -171,7 +175,7 @@ def iter_stack_frames(frames=None):
         yield frame, lineno
 
 
-def get_stack_info(frames, list_max_length=None, string_max_length=None):
+def get_stack_info(frames, transformer=transform):
     """
     Given a list of frames, returns a list of stack information
     dictionary objects that are JSON-ready.
@@ -216,7 +220,7 @@ def get_stack_info(frames, list_max_length=None, string_max_length=None):
         if lineno is not None and abs_path:
             pre_context, context_line, post_context = get_lines_from_file(abs_path, lineno, 5, loader, module_name)
         else:
-            pre_context, context_line, post_context = [], None, []
+            pre_context, context_line, post_context = None, None, None
 
         # Try to pull a relative file path
         # This changes /foo/site-packages/baz/bar.py into baz/bar.py
@@ -243,10 +247,9 @@ def get_stack_info(frames, list_max_length=None, string_max_length=None):
             'module': module_name or None,
             'function': function or '<unknown>',
             'lineno': lineno + 1,
-            'vars': transform(f_locals, list_max_length=list_max_length,
-                string_max_length=string_max_length),
+            'vars': transformer(f_locals),
         }
-        if context_line:
+        if context_line is not None:
             frame_result.update({
                 'pre_context': pre_context,
                 'context_line': context_line,

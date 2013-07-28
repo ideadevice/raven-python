@@ -1,13 +1,11 @@
-bootstrap: bootstrap-tests
+bootstrap:
 	pip install -e . --use-mirrors
+	pip install "file://`pwd`#egg=raven[dev]" --use-mirrors
+	pip install "file://`pwd`#egg=raven[tests]" --use-mirrors
 
-bootstrap-tests:
-	pip install -r test-requirements.txt --use-mirrors
-	pip install "flake8>=1.6" --use-mirrors
-
-test: lint
+test: bootstrap lint
 	@echo "Running Python tests"
-	python runtests.py -x
+	py.test -x tests
 	@echo ""
 
 lint:
