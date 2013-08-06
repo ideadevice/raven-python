@@ -18,7 +18,7 @@ ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), os.pardir))
 # This should be the full URL to sentries store view
 SERVERS = None
 
-TIMEOUT = 1
+TIMEOUT = 5
 
 # TODO: this is specific to Django
 CLIENT = 'raven.contrib.django.DjangoClient'
