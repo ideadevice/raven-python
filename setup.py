@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """
 Raven
-======
+=====
 
 Raven is a Python client for `Sentry <http://getsentry.com/>`_. It provides
 full out-of-the-box support for many of the popular frameworks, including
@@ -29,7 +29,7 @@ setup_requires = [
 ]
 
 dev_requires = [
-    'flake8>=1.6,<2.0',
+    'flake8>=2.0,<2.1',
 ]
 
 unittest2_requires = ['unittest2']
@@ -42,16 +42,23 @@ flask_tests_requires = [
     'Flask-Login>=0.2.0',
 ]
 
-# If it's python3, remove flask & unittest2
+webpy_tests_requires = [
+    'paste',
+    'web.py',
+]
+
+# If it's python3, remove flask, unittest2 & web.py
 if sys.version_info[0] == 3:
     flask_requires = []
     flask_tests_requires = []
     unittest2_requires = []
+    webpy_tests_requires = []
+
 
 tests_require = [
     'bottle',
     'celery>=2.5',
-    'Django>=1.2',
+    'Django>=1.4',
     'django-celery>=2.5',
     'exam>=0.5.2',
     'logbook',
@@ -67,13 +74,13 @@ tests_require = [
     'webob',
     'webtest',
     'anyjson',
-] + flask_requires + flask_tests_requires + unittest2_requires
+] + (flask_requires + flask_tests_requires + unittest2_requires +
+     webpy_tests_requires)
 
 
 class PyTest(TestCommand):
     def finalize_options(self):
         TestCommand.finalize_options(self)
-        self.test_args = []
         self.test_suite = True
 
     def run_tests(self):
@@ -85,7 +92,7 @@ class PyTest(TestCommand):
 
 setup(
     name='raven',
-    version='3.4.1-epsilon1',
+    version='4.2.0',
     author='David Cramer',
     author_email='dcramer@gmail.com',
     url='http://github.com/getsentry/raven-python',

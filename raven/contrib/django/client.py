@@ -32,10 +32,11 @@ class DjangoClient(Client):
 
     def get_user_info(self, user):
         if not user.is_authenticated():
-            return {}
+            return {'is_authenticated': False}
 
         user_info = {
             'id': user.pk,
+            'is_authenticated': True,
         }
 
         if hasattr(user, 'email'):
@@ -76,10 +77,13 @@ class DjangoClient(Client):
                 data = request.body
             except:
                 try:
-                    data = request.raw_post_data and request.raw_post_data or request.POST
+                    data = request.raw_post_data
                 except Exception:
-                    # assume we had a partial read:
-                    data = '<unavailable>'
+                    # assume we had a partial read.
+                    try:
+                        data = request.POST or '<unavailable>'
+                    except Exception:
+                        data = '<unavailable>'
         else:
             data = None
 
@@ -102,8 +106,12 @@ class DjangoClient(Client):
     def build_msg(self, *args, **kwargs):
         data = super(DjangoClient, self).build_msg(*args, **kwargs)
 
-        stacktrace = data.get('sentry.interfaces.Stacktrace')
-        if stacktrace:
+        stacks = (
+            data.get('sentry.interfaces.Stacktrace'),
+            data.get('sentry.interfaces.Exception', {}).get('stacktrace'),
+        )
+
+        for stacktrace in filter(bool, stacks):
             for frame in stacktrace['frames']:
                 module = frame.get('module')
                 if not module:

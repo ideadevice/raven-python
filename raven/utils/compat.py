@@ -1,6 +1,6 @@
 """
 raven.utils.compat
-~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~
 
 :copyright: (c) 2010-2012 by the Sentry Team, see AUTHORS for more details.
 :license: BSD, see LICENSE for more details.
@@ -15,10 +15,18 @@ except ImportError:
 
 
 try:
-    from urllib.request import Request, urlopen
+    import httplib  # NOQA
 except ImportError:
-    from urllib2 import Request, urlopen  # NOQA
+    from http import client as httplib  # NOQA
 
+
+try:
+    import urllib.request as urllib2
+except ImportError:
+    import urllib2
+
+Request = urllib2.Request
+urlopen = urllib2.urlopen
 
 try:
     from urllib import quote as urllib_quote
@@ -37,6 +45,7 @@ try:
 except ImportError:
     from urllib import parse as _urlparse  # NOQA
 
+urlparse = _urlparse
 
 try:
     from unittest2 import TestCase

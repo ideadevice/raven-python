@@ -141,10 +141,18 @@ def get_client(client=None):
 
         class_name = str(class_name)
 
-        instance = getattr(__import__(module, {}, {}, class_name), class_name)(**options)
-        if not tmp_client:
-            _client = (client, instance)
-        return instance
+        try:
+            instance = getattr(__import__(module, {}, {}, class_name), class_name)(**options)
+        except ImportError:
+            logger.exception('Failed to import client: %s', client)
+            if not _client[1]:
+                # If there is no previous client, set the default one.
+                client = 'raven.contrib.django.DjangoClient'
+                _client = (client, get_client(client))
+        else:
+            if not tmp_client:
+                _client = (client, instance)
+            return instance
     return _client[1]
 
 
@@ -175,8 +183,13 @@ def register_handlers():
     # HACK: support Sentry's internal communication
     if 'sentry' in django_settings.INSTALLED_APPS:
         from django.db import transaction
+        # Django 1.6
+        if hasattr(transaction, 'atomic'):
+            commit_on_success = transaction.atomic
+        else:
+            commit_on_success = transaction.commit_on_success
 
-        @transaction.commit_on_success
+        @commit_on_success
         def wrap_sentry(request, **kwargs):
             if transaction.is_dirty():
                 transaction.rollback()

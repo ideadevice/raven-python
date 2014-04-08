@@ -20,6 +20,10 @@ class AsyncSentryClient(Client):
     asynchronously send errors to sentry. The client also captures the
     information from the request handlers
     """
+    def __init__(self, *args, **kwargs):
+        self.validate_cert = kwargs.pop('validate_cert', True)
+        super(AsyncSentryClient, self).__init__(*args, **kwargs)
+
     def capture(self, *args, **kwargs):
         """
         Takes the same arguments as the super function in :py:class:`Client`
@@ -74,7 +78,10 @@ class AsyncSentryClient(Client):
                 callback=kwargs.get('callback', None)
             )
 
-    def send_remote(self, url, data, headers={}, callback=None):
+    def send_remote(self, url, data, headers=None, callback=None):
+        if headers is None:
+            headers = {}
+
         if not self.state.should_try():
             message = self._get_log_message(data)
             self.error_logger.error(message)
@@ -113,7 +120,8 @@ class AsyncSentryClient(Client):
             headers = {}
 
         return AsyncHTTPClient().fetch(
-            url, callback, method="POST", body=data, headers=headers
+            url, callback, method="POST", body=data, headers=headers,
+            validate_cert=self.validate_cert
         )
 
 
@@ -178,7 +186,7 @@ class SentryMixin(object):
             'sentry.interfaces.Http': {
                 'url': self.request.full_url(),
                 'method': self.request.method,
-                'data': self.request.arguments,
+                'data': self.request.body,
                 'query_string': self.request.query,
                 'cookies': self.request.headers.get('Cookie', None),
                 'headers': dict(self.request.headers),
@@ -260,5 +268,6 @@ class SentryMixin(object):
             return super(SentryMixin, self).send_error(status_code, **kwargs)
         else:
             rv = super(SentryMixin, self).send_error(status_code, **kwargs)
-            self.captureException(exc_info=kwargs.get('exc_info'))
+            if 500 <= status_code <= 599:
+                self.captureException(exc_info=kwargs.get('exc_info'))
             return rv

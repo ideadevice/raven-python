@@ -12,13 +12,13 @@ import pytest
 import re
 import sys  # NOQA
 from exam import fixture
-from celery.tests.utils import with_eager_tasks
 
 from django.conf import settings
 from django.core.exceptions import SuspiciousOperation
 from django.core.urlresolvers import reverse
 from django.core.signals import got_request_exception
 from django.core.handlers.wsgi import WSGIRequest
+from django.http import QueryDict
 from django.template import TemplateSyntaxError
 from django.test import TestCase
 
@@ -189,6 +189,7 @@ class DjangoClientTest(TestCase):
         assert 'sentry.interfaces.User' in event
         user_info = event['sentry.interfaces.User']
         assert user_info == {
+            'is_authenticated': True,
             'username': user.username,
             'id': user.id,
             'email': user.email,
@@ -212,6 +213,7 @@ class DjangoClientTest(TestCase):
         )
         user_info = self.raven.get_user_info(user)
         assert user_info == {
+            'is_authenticated': True,
             'username': user.username,
             'id': user.id,
             'email': user.email,
@@ -383,6 +385,19 @@ class DjangoClientTest(TestCase):
             assert resp.status_code == 404
             assert self.raven.events == []
 
+    def test_invalid_client(self):
+        extra_settings = {
+            'SENTRY_CLIENT': 'raven.contrib.django.DjangoClient',  # default
+        }
+        # Should return fallback client (TempStoreClient)
+        client = get_client('nonexistant.and.invalid')
+
+        # client should be valid, and the same as with the next call.
+        assert client is get_client()
+
+        with Settings(**extra_settings):
+            assert isinstance(get_client(), DjangoClient)
+
     def test_response_error_id_middleware(self):
         # TODO: test with 500s
         with Settings(MIDDLEWARE_CLASSES=['raven.contrib.django.middleware.SentryResponseErrorIdMiddleware',
@@ -404,10 +419,7 @@ class DjangoClientTest(TestCase):
             self.raven)
         self.assertEquals(get_client(), self.raven)
 
-    # This test only applies to Django 1.3+
     def test_raw_post_data_partial_read(self):
-        if django.VERSION[:2] < (1, 3):
-            return
         v = '{"foo": "bar"}'
         request = make_request()
         request.environ.update({
@@ -427,10 +439,22 @@ class DjangoClientTest(TestCase):
         self.assertEquals(http['method'], 'POST')
         self.assertEquals(http['data'], '<unavailable>')
 
-    # This test only applies to Django 1.3+
+    def test_read_post_data(self):
+        request = make_request()
+        request.POST = QueryDict("foo=bar&ham=spam")
+        request.read(1)
+
+        self.raven.captureMessage(message='foo', request=request)
+
+        self.assertEquals(len(self.raven.events), 1)
+        event = self.raven.events.pop(0)
+
+        self.assertTrue('sentry.interfaces.Http' in event)
+        http = event['sentry.interfaces.Http']
+        self.assertEquals(http['method'], 'POST')
+        self.assertEquals(http['data'], {'foo': 'bar', 'ham': 'spam'})
+
     def test_request_capture(self):
-        if django.VERSION[:2] < (1, 3):
-            return
         request = make_request()
         request.read(1)
 
@@ -459,7 +483,7 @@ class DjangoClientTest(TestCase):
         self.assertEquals(len(self.raven.events), 1)
         event = self.raven.events.pop(0)
 
-        frames = event['sentry.interfaces.Stacktrace']['frames']
+        frames = event['sentry.interfaces.Exception']['stacktrace']['frames']
         for frame in frames:
             if frame['module'].startswith('django.'):
                 assert frame.get('in_app') is False
@@ -573,17 +597,6 @@ class CeleryIsolatedClientTest(TestCase):
 
         self.assertEquals(send_raw.delay.call_count, 1)
 
-    @with_eager_tasks
-    @mock.patch('raven.contrib.django.DjangoClient.send_encoded')
-    def test_with_eager(self, send_encoded):
-        """
-        Integration test to ensure it propagates all the way down
-        and calls the parent client's send_encoded method.
-        """
-        self.client.captureMessage(message='test')
-
-        self.assertEquals(send_encoded.call_count, 1)
-
 
 class CeleryIntegratedClientTest(TestCase):
     def setUp(self):
@@ -606,17 +619,6 @@ class CeleryIntegratedClientTest(TestCase):
             self.client.captureMessage(message='test')
 
             self.assertEquals(send_raw.delay.call_count, 1)
-
-    @with_eager_tasks
-    @mock.patch('raven.contrib.django.DjangoClient.send_encoded')
-    def test_with_eager(self, send_encoded):
-        """
-        Integration test to ensure it propagates all the way down
-        and calls the parent client's send_encoded method.
-        """
-        self.client.captureMessage(message='test')
-
-        self.assertEquals(send_encoded.call_count, 1)
 
 
 class IsValidOriginTestCase(TestCase):

@@ -77,26 +77,23 @@ class ClientTest(TestCase):
         assert base.Raven is client
         assert client is not client2
 
-    @mock.patch('raven.transport.base.HTTPTransport.send')
+    @mock.patch('raven.transport.http.HTTPTransport.send')
     @mock.patch('raven.base.ClientState.should_try')
     def test_send_remote_failover(self, should_try, send):
         should_try.return_value = True
 
         client = Client(
-            servers=['http://example.com'],
-            public_key='public',
-            secret_key='secret',
-            project=1,
+            dsn='sync+http://public:secret@example.com/1'
         )
 
         # test error
         send.side_effect = Exception()
-        client.send_remote('http://example.com/api/store', 'foo')
+        client.send_remote('sync+http://example.com/api/store', 'foo')
         self.assertEquals(client.state.status, client.state.ERROR)
 
         # test recovery
         send.side_effect = None
-        client.send_remote('http://example.com/api/store', 'foo')
+        client.send_remote('sync+http://example.com/api/store', 'foo')
         self.assertEquals(client.state.status, client.state.ONLINE)
 
     @mock.patch('raven.base.Client._registry.get_transport')
@@ -152,7 +149,7 @@ class ClientTest(TestCase):
                 'Content-Type': 'application/octet-stream',
                 'X-Sentry-Auth': (
                     'Sentry sentry_timestamp=1328055286.51, '
-                    'sentry_client=raven-python/%s, sentry_version=2.0, '
+                    'sentry_client=raven-python/%s, sentry_version=4, '
                     'sentry_key=public, '
                     'sentry_secret=secret' % (raven.VERSION,))
             },
@@ -227,6 +224,16 @@ class ClientTest(TestCase):
         event = self.client.events.pop(0)
         self.assertEquals(event['message'], 'foo')
 
+    def test_message_from_kwargs(self):
+        try:
+            raise ValueError('foo')
+        except:
+            self.client.captureException(message='test', data={})
+
+        self.assertEquals(len(self.client.events), 1)
+        event = self.client.events.pop(0)
+        self.assertEquals(event['message'], 'test')
+
     def test_explicit_message_on_exception_event(self):
         try:
             raise ValueError('foo')
@@ -251,15 +258,60 @@ class ClientTest(TestCase):
         self.assertEquals(exc['type'], 'ValueError')
         self.assertEquals(exc['value'], 'foo')
         self.assertEquals(exc['module'], ValueError.__module__)  # this differs in some Python versions
-        self.assertTrue('sentry.interfaces.Stacktrace' in event)
-        frames = event['sentry.interfaces.Stacktrace']
-        self.assertEquals(len(frames['frames']), 1)
-        frame = frames['frames'][0]
+        assert 'sentry.interfaces.Stacktrace' not in event
+        stacktrace = exc['stacktrace']
+        self.assertEquals(len(stacktrace['frames']), 1)
+        frame = stacktrace['frames'][0]
         self.assertEquals(frame['abs_path'], __file__.replace('.pyc', '.py'))
         self.assertEquals(frame['filename'], 'tests/base/tests.py')
         self.assertEquals(frame['module'], __name__)
         self.assertEquals(frame['function'], 'test_exception_event')
         self.assertTrue('timestamp' in event)
+
+    def test_decorator_preserves_function(self):
+        @self.client.capture_exceptions
+        def test1():
+            return 'foo'
+
+        self.assertEquals(test1(), 'foo')
+
+    class DecoratorTestException(Exception):
+        pass
+
+    def test_decorator_functionality(self):
+        @self.client.capture_exceptions
+        def test2():
+            raise self.DecoratorTestException()
+
+        try:
+            test2()
+        except self.DecoratorTestException:
+            pass
+
+        self.assertEquals(len(self.client.events), 1)
+        event = self.client.events.pop(0)
+        self.assertEquals(event['message'], 'DecoratorTestException')
+        exc = event['sentry.interfaces.Exception']
+        self.assertEquals(exc['type'], 'DecoratorTestException')
+        self.assertEquals(exc['module'], self.DecoratorTestException.__module__)
+        stacktrace = exc['stacktrace']
+        # this is a wrapped function so two frames are expected
+        self.assertEquals(len(stacktrace['frames']), 2)
+        frame = stacktrace['frames'][1]
+        self.assertEquals(frame['module'], __name__)
+        self.assertEquals(frame['function'], 'test2')
+
+    def test_decorator_filtering(self):
+        @self.client.capture_exceptions(self.DecoratorTestException)
+        def test3():
+            raise Exception()
+
+        try:
+            test3()
+        except:
+            pass
+
+        self.assertEquals(len(self.client.events), 0)
 
     def test_message_event(self):
         self.client.captureMessage(message='test')
@@ -270,35 +322,20 @@ class ClientTest(TestCase):
         self.assertFalse('sentry.interfaces.Stacktrace' in event)
         self.assertTrue('timestamp' in event)
 
-    def test_exception_context_manager(self):
-        cm = self.client.context(tags={'foo': 'bar'})
+    def test_context(self):
+        self.client.context.merge({
+            'tags': {'foo': 'bar'},
+        })
         try:
-            with cm:
-                raise ValueError('foo')
+            raise ValueError('foo')
         except:
-            pass
+            self.client.captureException()
         else:
             self.fail('Exception should have been raised')
 
-        self.assertNotEquals(cm.result, None)
-
-        self.assertEquals(len(self.client.events), 1)
+        assert len(self.client.events) == 1
         event = self.client.events.pop(0)
-        self.assertEquals(event['message'], 'ValueError: foo')
-        self.assertTrue('sentry.interfaces.Exception' in event)
-        exc = event['sentry.interfaces.Exception']
-        self.assertEquals(exc['type'], 'ValueError')
-        self.assertEquals(exc['value'], 'foo')
-        self.assertEquals(exc['module'], ValueError.__module__)  # this differs in some Python versions
-        self.assertTrue('sentry.interfaces.Stacktrace' in event)
-        frames = event['sentry.interfaces.Stacktrace']
-        self.assertEquals(len(frames['frames']), 1)
-        frame = frames['frames'][0]
-        self.assertEquals(frame['abs_path'], __file__.replace('.pyc', '.py'))
-        self.assertEquals(frame['filename'], 'tests/base/tests.py')
-        self.assertEquals(frame['module'], __name__)
-        self.assertEquals(frame['function'], 'test_exception_context_manager')
-        self.assertTrue('timestamp' in event)
+        assert event['tags'] == {'foo': 'bar'}
 
     def test_stack_explicit_frames(self):
         def bar():

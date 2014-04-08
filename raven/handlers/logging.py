@@ -19,7 +19,11 @@ from raven.utils import six
 from raven.utils.encoding import to_string
 from raven.utils.stacks import iter_stack_frames, label_from_frame
 
-RESERVED = ('stack', 'name', 'module', 'funcName', 'args', 'msg', 'levelno', 'exc_text', 'exc_info', 'data', 'created', 'levelname', 'msecs', 'relativeCreated', 'tags')
+RESERVED = frozenset((
+    'stack', 'name', 'module', 'funcName', 'args', 'msg', 'levelno',
+    'exc_text', 'exc_info', 'data', 'created', 'levelname', 'msecs',
+    'relativeCreated', 'tags',
+))
 
 
 class SentryHandler(logging.Handler, object):
@@ -46,21 +50,26 @@ class SentryHandler(logging.Handler, object):
 
         logging.Handler.__init__(self, level=kwargs.get('level', logging.NOTSET))
 
+    def can_record(self, record):
+        return not (
+            record.name == 'raven' or
+            record.name.startswith(('sentry.errors', 'raven.'))
+        )
+
     def emit(self, record):
         try:
             # Beware to python3 bug (see #10805) if exc_info is (None, None, None)
             self.format(record)
 
-            # Avoid typical config issues by overriding loggers behavior
-            if record.name.startswith(('sentry.errors', 'raven')) or record.module.startswith('raven'):
-                print(to_string(record.message), sys.stderr)
+            if not self.can_record(record):
+                print(to_string(record.message), file=sys.stderr)
                 return
 
             return self._emit(record)
         except Exception:
-            print("Top level Sentry exception caught - failed creating log record", sys.stderr)
-            print(to_string(record.msg), sys.stderr)
-            print(to_string(traceback.format_exc()), sys.stderr)
+            print("Top level Sentry exception caught - failed creating log record", file=sys.stderr)
+            print(to_string(record.msg), file=sys.stderr)
+            print(to_string(traceback.format_exc()), file=sys.stderr)
 
     def _get_targetted_stack(self, stack):
         # we might need to traverse this multiple times, so coerce it to a list
@@ -108,7 +117,7 @@ class SentryHandler(logging.Handler, object):
                 continue
             if k.startswith('_'):
                 continue
-            if '.' not in k and k not in ('culprit',):
+            if '.' not in k and k not in ('culprit', 'server_name'):
                 extra[k] = v
             else:
                 data[k] = v
