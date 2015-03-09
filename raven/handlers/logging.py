@@ -22,7 +22,7 @@ from raven.utils.stacks import iter_stack_frames, label_from_frame
 RESERVED = frozenset((
     'stack', 'name', 'module', 'funcName', 'args', 'msg', 'levelno',
     'exc_text', 'exc_info', 'data', 'created', 'levelname', 'msecs',
-    'relativeCreated', 'tags',
+    'relativeCreated', 'tags', 'message',
 ))
 
 
@@ -32,7 +32,7 @@ class SentryHandler(logging.Handler, object):
         if len(args) == 1:
             arg = args[0]
             if isinstance(arg, six.string_types):
-                self.client = client(dsn=arg)
+                self.client = client(dsn=arg, **kwargs)
             elif isinstance(arg, Client):
                 self.client = arg
             else:
@@ -67,11 +67,13 @@ class SentryHandler(logging.Handler, object):
 
             return self._emit(record)
         except Exception:
+            if self.client.raise_send_errors:
+                raise
             print("Top level Sentry exception caught - failed creating log record", file=sys.stderr)
             print(to_string(record.msg), file=sys.stderr)
             print(to_string(traceback.format_exc()), file=sys.stderr)
 
-    def _get_targetted_stack(self, stack):
+    def _get_targetted_stack(self, stack, record):
         # we might need to traverse this multiple times, so coerce it to a list
         stack = list(stack)
         frames = []
@@ -87,8 +89,8 @@ class SentryHandler(logging.Handler, object):
             if not started:
                 f_globals = getattr(frame, 'f_globals', {})
                 module_name = f_globals.get('__name__', '')
-                if ((last_mod and last_mod.startswith('logging'))
-                        and not module_name.startswith('logging')):
+                if ((last_mod and last_mod.startswith('logging')) and
+                        not module_name.startswith('logging')):
                     started = True
                 else:
                     last_mod = module_name
@@ -127,7 +129,7 @@ class SentryHandler(logging.Handler, object):
             stack = iter_stack_frames()
 
         if stack:
-            stack = self._get_targetted_stack(stack)
+            stack = self._get_targetted_stack(stack, record)
 
         date = datetime.datetime.utcfromtimestamp(record.created)
         event_type = 'raven.events.Message'
@@ -159,7 +161,7 @@ class SentryHandler(logging.Handler, object):
             handler_kwargs = {'exc_info': record.exc_info}
 
         # HACK: discover a culprit when we normally couldn't
-        elif not (data.get('sentry.interfaces.Stacktrace') or data.get('culprit')) and (record.name or record.funcName):
+        elif not (data.get('stacktrace') or data.get('culprit')) and (record.name or record.funcName):
             culprit = label_from_frame({'module': record.name, 'function': record.funcName})
             if culprit:
                 data['culprit'] = culprit

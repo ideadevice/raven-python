@@ -7,18 +7,20 @@ Acts as an implicit hook for Django installs.
 :copyright: (c) 2010-2012 by the Sentry Team, see AUTHORS for more details.
 :license: BSD, see LICENSE for more details.
 """
+# flake8: noqa
 
-from __future__ import absolute_import
-from __future__ import unicode_literals
+from __future__ import absolute_import, unicode_literals
 
-from hashlib import md5
+import copy
 import logging
 import sys
 import warnings
 
+from django.conf import settings as django_settings
+from hashlib import md5
+
 from raven.utils import six
 
-from django.conf import settings as django_settings
 
 logger = logging.getLogger('sentry.errors.client')
 
@@ -35,7 +37,7 @@ _client = (None, None)
 
 class ProxyClient(object):
     """
-    A proxy which represents the currenty client at all times.
+    A proxy which represents the currently client at all times.
     """
     # introspection support:
     __members__ = property(lambda x: x.__dir__())
@@ -120,7 +122,7 @@ def get_client(client=None):
         module, class_name = client.rsplit('.', 1)
 
         ga = lambda x, d=None: getattr(django_settings, 'SENTRY_%s' % x, d)
-        options = getattr(django_settings, 'RAVEN_CONFIG', {})
+        options = copy.deepcopy(getattr(django_settings, 'RAVEN_CONFIG', {}))
         options.setdefault('servers', ga('SERVERS'))
         options.setdefault('include_paths', ga('INCLUDE_PATHS', []))
         options['include_paths'] = set(options['include_paths']) | get_installed_apps()
@@ -138,11 +140,12 @@ def get_client(client=None):
         options.setdefault('processors', ga('PROCESSORS'))
         options.setdefault('dsn', ga('DSN'))
         options.setdefault('context', ga('CONTEXT'))
+        options.setdefault('release', ga('RELEASE'))
 
         class_name = str(class_name)
 
         try:
-            instance = getattr(__import__(module, {}, {}, class_name), class_name)(**options)
+            Client = getattr(__import__(module, {}, {}, class_name), class_name)
         except ImportError:
             logger.exception('Failed to import client: %s', client)
             if not _client[1]:
@@ -150,6 +153,7 @@ def get_client(client=None):
                 client = 'raven.contrib.django.DjangoClient'
                 _client = (client, get_client(client))
         else:
+            instance = Client(**options)
             if not tmp_client:
                 _client = (client, instance)
             return instance
@@ -217,7 +221,12 @@ def register_handlers():
                 logger.exception('Failed to install Celery error handler')
 
             try:
-                register_logger_signal(client)
+                ga = lambda x, d=None: getattr(django_settings, 'SENTRY_%s' % x, d)
+                options = getattr(django_settings, 'RAVEN_CONFIG', {})
+                loglevel = options.get('celery_loglevel',
+                                       ga('CELERY_LOGLEVEL', logging.ERROR))
+
+                register_logger_signal(client, loglevel=loglevel)
             except Exception:
                 logger.exception('Failed to install Celery error handler')
 

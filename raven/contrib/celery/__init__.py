@@ -2,15 +2,6 @@
 raven.contrib.celery
 ~~~~~~~~~~~~~~~~~~~~
 
->>> class CeleryClient(CeleryMixin, Client):
->>>     def send_encoded(self, *args, **kwargs):
->>>         "Errors through celery"
->>>         self.send_raw.delay(*args, **kwargs)
-
->>> @task(routing_key='sentry')
->>> def send_raw(*args, **kwargs):
->>>     return super(client, self).send_encoded(*args, **kwargs)
-
 :copyright: (c) 2010-2012 by the Sentry Team, see AUTHORS for more details.
 :license: BSD, see LICENSE for more details.
 """
@@ -45,14 +36,14 @@ def register_signal(client):
     task_failure.connect(process_failure_signal, weak=False)
 
 
-def register_logger_signal(client, logger=None):
+def register_logger_signal(client, logger=None, loglevel=logging.ERROR):
     filter_ = CeleryFilter()
 
     if logger is None:
         logger = logging.getLogger()
-        handler = SentryHandler(client)
-        handler.setLevel(logging.ERROR)
-        handler.addFilter(filter_)
+    handler = SentryHandler(client)
+    handler.setLevel(loglevel)
+    handler.addFilter(filter_)
 
     def process_logger_event(sender, logger, loglevel, logfile, format,
                              colorize, **kw):

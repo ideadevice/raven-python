@@ -45,8 +45,14 @@ class ZopeSentryHandler(SentryHandler):
         level = kw.get('level', logging.ERROR)
         self.setLevel(level)
 
+    def can_record(self, record):
+        return not (
+            record.name == 'raven' or
+            record.name.startswith(('sentry.errors', 'raven.'))
+        )
+
     def emit(self, record):
-        if record.levelno <= logging.ERROR:
+        if record.levelno <= logging.ERROR and self.can_record(record):
             request = None
             exc_info = None
             for frame_info in getouterframes(currentframe()):
@@ -86,9 +92,8 @@ class ZopeSentryHandler(SentryHandler):
                             http['headers']['User-Agent'] = \
                                 http['headers']['HTTP_USER_AGENT']
                     if 'QUERY_STRING' in http['headers']:
-                        http['query_string'] = http['headers'
-                                ]['QUERY_STRING']
-                    setattr(record, 'sentry.interfaces.Http', http)
+                        http['query_string'] = http['headers']['QUERY_STRING']
+                    setattr(record, 'request', http)
                     user = request.get('AUTHENTICATED_USER', None)
                     if user is not None:
                         user_dict = dict(id=user.getId(),
@@ -96,7 +101,7 @@ class ZopeSentryHandler(SentryHandler):
                                          email=user.getProperty('email') or '')
                     else:
                         user_dict = {'is_authenticated': False}
-                    setattr(record, 'sentry.interfaces.User', user_dict)
+                    setattr(record, 'user', user_dict)
                 except (AttributeError, KeyError):
                     logger.warning('Could not extract data from request', exc_info=True)
         return super(ZopeSentryHandler, self).emit(record)

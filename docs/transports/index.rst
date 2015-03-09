@@ -16,7 +16,7 @@ All transports should support at least the following options:
   If the connection is HTTPS, validate the certificate and hostname.
 
 ``ca_certs = [raven]/data/cacert.pem``
-  A certificate bundle to use when validating SSL conections.
+  A certificate bundle to use when validating SSL connections.
 
 For example, to increase the timeout and to disable SSL verification:
 
@@ -24,6 +24,16 @@ For example, to increase the timeout and to disable SSL verification:
 
 	SENTRY_DSN = 'http://public:secret@example.com/1?timeout=5&verify_ssl=0'
 
+
+aiohttp
+-------
+
+Should only be used within a :pep:`3156` compatible event loops
+(*asyncio* itself and others).
+
+::
+
+    SENTRY_DSN = 'aiohttp+http://public:secret@example.com/1'
 
 Eventlet
 --------
@@ -52,7 +62,7 @@ Requires the ``requests`` library. Synchronous.
 
 ::
 
-    SENTRY_DSN = 'gevent+http://public:secret@example.com/1'
+    SENTRY_DSN = 'requests+http://public:secret@example.com/1'
 
 
 Sync
@@ -68,7 +78,7 @@ A synchronous blocking transport.
 Threaded (Default)
 ------------------
 
-Spawns a async worked for processing messages.
+Spawns an async worker for processing messages.
 
 ::
 

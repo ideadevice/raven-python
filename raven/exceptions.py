@@ -13,4 +13,10 @@ class APIError(Exception):
 
 
 class RateLimited(APIError):
+    def __init__(self, message, retry_after=0):
+        self.retry_after = retry_after
+        super(RateLimited, self).__init__(message, 429)
+
+
+class InvalidGitRepository(Exception):
     pass

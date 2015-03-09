@@ -19,8 +19,8 @@ import sys
 import os
 import logging
 
-from flask import request, current_app
-from flask.signals import got_request_exception
+from flask import request, current_app, g
+from flask.signals import got_request_exception, request_finished
 from raven.conf import setup_logging
 from raven.base import Client
 from raven.middleware import Sentry as SentryMiddleware
@@ -44,6 +44,8 @@ def make_client(client_cls, app, dsn=None):
         processors=app.config.get('SENTRY_PROCESSORS'),
         string_max_length=app.config.get('SENTRY_MAX_LENGTH_STRING'),
         list_max_length=app.config.get('SENTRY_MAX_LENGTH_LIST'),
+        auto_log_stacks=app.config.get('SENTRY_AUTO_LOG_STACKS'),
+        tags=app.config.get('SENTRY_TAGS'),
         extra={
             'app': app,
         },
@@ -89,6 +91,8 @@ class Sentry(object):
       `wrap_wsgi=False`.
     - Capture information from Flask-Login (if available).
     """
+    # TODO(dcramer): the client isn't using local context and therefore
+    # gets shared by every app that does init on it
     def __init__(self, app=None, client=None, client_cls=Client, dsn=None,
                  logging=False, level=logging.NOTSET, wrap_wsgi=True,
                  register_signal=True):
@@ -102,6 +106,18 @@ class Sentry(object):
 
         if app:
             self.init_app(app)
+
+    @property
+    def last_event_id(self):
+        return getattr(self, '_last_event_id', None)
+
+    @last_event_id.setter
+    def last_event_id(self, value):
+        self._last_event_id = value
+        try:
+            g.sentry_event_id = value
+        except Exception:
+            pass
 
     def handle_exception(self, *args, **kwargs):
         if not self.client:
@@ -171,12 +187,30 @@ class Sentry(object):
         }
 
     def before_request(self, *args, **kwargs):
+        self.last_event_id = None
         self.client.http_context(self.get_http_info(request))
         self.client.user_context(self.get_user_info(request))
 
-    def init_app(self, app, dsn=None):
+    def add_sentry_id_header(self, sender, response, *args, **kwargs):
+        response.headers['X-Sentry-ID'] = self.last_event_id
+        return response
+
+    def init_app(self, app, dsn=None, logging=None, level=None, wrap_wsgi=None,
+                 register_signal=None):
         if dsn is not None:
             self.dsn = dsn
+
+        if level is not None:
+            self.level = level
+
+        if wrap_wsgi is not None:
+            self.wrap_wsgi = wrap_wsgi
+
+        if register_signal is not None:
+            self.register_signal = register_signal
+
+        if logging is not None:
+            self.logging = logging
 
         if not self.client:
             self.client = make_client(self.client_cls, app, self.dsn)
@@ -191,6 +225,7 @@ class Sentry(object):
 
         if self.register_signal:
             got_request_exception.connect(self.handle_exception, sender=app)
+            request_finished.connect(self.add_sentry_id_header, sender=app)
 
         if not hasattr(app, 'extensions'):
             app.extensions = {}
@@ -198,8 +233,18 @@ class Sentry(object):
 
     def captureException(self, *args, **kwargs):
         assert self.client, 'captureException called before application configured'
-        return self.client.captureException(*args, **kwargs)
+        result = self.client.captureException(*args, **kwargs)
+        if result:
+            self.last_event_id = self.client.get_ident(result)
+        else:
+            self.last_event_id = None
+        return result
 
     def captureMessage(self, *args, **kwargs):
         assert self.client, 'captureMessage called before application configured'
-        return self.client.captureMessage(*args, **kwargs)
+        result = self.client.captureMessage(*args, **kwargs)
+        if result:
+            self.last_event_id = self.client.get_ident(result)
+        else:
+            self.last_event_id = None
+        return result

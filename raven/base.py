@@ -24,7 +24,7 @@ from types import FunctionType
 import raven
 from raven.conf import defaults
 from raven.context import Context
-from raven.exceptions import APIError
+from raven.exceptions import APIError, RateLimited
 from raven.utils import six, json, get_versions, get_auth_header, merge_dicts
 from raven.utils.encoding import to_unicode
 from raven.utils.serializer import transform
@@ -61,27 +61,30 @@ class ClientState(object):
         self.status = self.ONLINE
         self.last_check = None
         self.retry_number = 0
+        self.retry_after = 0
 
     def should_try(self):
         if self.status == self.ONLINE:
             return True
 
-        interval = min(self.retry_number, 6) ** 2
+        interval = self.retry_after or min(self.retry_number, 6) ** 2
 
         if time.time() - self.last_check > interval:
             return True
 
         return False
 
-    def set_fail(self):
+    def set_fail(self, retry_after=0):
         self.status = self.ERROR
         self.retry_number += 1
         self.last_check = time.time()
+        self.retry_after = retry_after
 
     def set_success(self):
         self.status = self.ONLINE
         self.last_check = None
         self.retry_number = 0
+        self.retry_after = 0
 
     def did_fail(self):
         return self.status == self.ERROR
@@ -112,16 +115,18 @@ class Client(object):
     >>>     print "Exception caught; reference is %s" % ident
     """
     logger = logging.getLogger('raven')
-    protocol_version = '4'
+    protocol_version = '6'
 
     _registry = TransportRegistry(transports=default_transports)
 
-    def __init__(self, dsn=None, **options):
+    def __init__(self, dsn=None, raise_send_errors=False, **options):
         global Raven
 
         o = options
 
         self.configure_logging()
+
+        self.raise_send_errors = raise_send_errors
 
         # configure loggers first
         cls = self.__class__
@@ -130,37 +135,8 @@ class Client(object):
             '%s.%s' % (cls.__module__, cls.__name__))
         self.error_logger = logging.getLogger('sentry.errors')
 
-        if dsn is None and os.environ.get('SENTRY_DSN'):
-            msg = "Configuring Raven from environment variable 'SENTRY_DSN'"
-            self.logger.debug(msg)
-            dsn = os.environ['SENTRY_DSN']
-
-        if dsn:
-            # TODO: should we validate other options werent sent?
-            urlparts = urlparse(dsn)
-            self.logger.debug(
-                "Configuring Raven for host: %s://%s:%s" % (urlparts.scheme,
-                urlparts.netloc, urlparts.path))
-            dsn_config = raven.load(dsn, transport_registry=self._registry)
-            servers = dsn_config['SENTRY_SERVERS']
-            project = dsn_config['SENTRY_PROJECT']
-            public_key = dsn_config['SENTRY_PUBLIC_KEY']
-            secret_key = dsn_config['SENTRY_SECRET_KEY']
-            transport_options = dsn_config.get('SENTRY_TRANSPORT_OPTIONS', {})
-        else:
-            if o.get('servers'):
-                warnings.warn('Manually configured connections are deprecated. Switch to a DSN.', DeprecationWarning)
-            servers = o.get('servers')
-            project = o.get('project')
-            public_key = o.get('public_key')
-            secret_key = o.get('secret_key')
-            transport_options = {}
-
-        self.servers = servers
-        self.public_key = public_key
-        self.secret_key = secret_key
-        self.project = project or defaults.PROJECT
-        self.transport_options = transport_options
+        self.dsns = {}
+        self.set_dsn(dsn, **options)
 
         self.include_paths = set(o.get('include_paths') or [])
         self.exclude_paths = set(o.get('exclude_paths') or [])
@@ -184,6 +160,7 @@ class Client(object):
             context = {'sys.argv': sys.argv[:]}
         self.extra = context
         self.tags = o.get('tags') or {}
+        self.release = o.get('release')
 
         self.module_cache = ModuleProxyCache()
 
@@ -197,6 +174,45 @@ class Client(object):
             Raven = self
 
         self._context = Context()
+
+    def set_dsn(self, dsn=None, **options):
+        o = options
+
+        if dsn is None and os.environ.get('SENTRY_DSN'):
+            msg = "Configuring Raven from environment variable 'SENTRY_DSN'"
+            self.logger.debug(msg)
+            dsn = os.environ['SENTRY_DSN']
+
+        try:
+            servers, public_key, secret_key, project, transport_options = self.dsns[dsn]
+        except KeyError:
+            if dsn:
+                # TODO: should we validate other options weren't sent?
+                urlparts = urlparse(dsn)
+                self.logger.debug(
+                    "Configuring Raven for host: %s://%s:%s" % (urlparts.scheme,
+                    urlparts.netloc, urlparts.path))
+                dsn_config = raven.load(dsn, transport_registry=self._registry)
+                servers = dsn_config['SENTRY_SERVERS']
+                project = dsn_config['SENTRY_PROJECT']
+                public_key = dsn_config['SENTRY_PUBLIC_KEY']
+                secret_key = dsn_config['SENTRY_SECRET_KEY']
+                transport_options = dsn_config.get('SENTRY_TRANSPORT_OPTIONS', {})
+            else:
+                if o.get('servers'):
+                    warnings.warn('Manually configured connections are deprecated. Switch to a DSN.', DeprecationWarning)
+                servers = o.get('servers')
+                project = o.get('project')
+                public_key = o.get('public_key')
+                secret_key = o.get('secret_key')
+                transport_options = {}
+            self.dsns[dsn] = servers, public_key, secret_key, project, transport_options
+
+        self.servers = servers
+        self.public_key = public_key
+        self.secret_key = secret_key
+        self.project = project or defaults.PROJECT
+        self.transport_options = transport_options
 
     @classmethod
     def register_scheme(cls, scheme, transport_class):
@@ -223,7 +239,7 @@ class Client(object):
         """
         Returns a searchable string representing a message.
 
-        >>> result = client.process(**kwargs)
+        >>> result = client.capture(**kwargs)
         >>> ident = client.get_ident(result)
         """
         return '$'.join(result)
@@ -274,9 +290,6 @@ class Client(object):
         data.setdefault('tags', {})
         data.setdefault('extra', {})
 
-        if stack is None:
-            stack = self.auto_log_stacks
-
         if '.' not in event_type:
             # Assume it's a builtin
             event_type = 'raven.events.%s' % event_type
@@ -293,7 +306,13 @@ class Client(object):
             if k not in data:
                 data[k] = v
 
-        if stack and 'sentry.interfaces.Stacktrace' not in data:
+        # auto_log_stacks only applies to events that are not exceptions
+        # due to confusion about which stack is which and the automatic
+        # application of stacktrace to exception objects by Sentry
+        if stack is None and 'exception' not in data:
+            stack = self.auto_log_stacks
+
+        if stack and 'stacktrace' not in data:
             if stack is True:
                 frames = iter_stack_frames()
 
@@ -306,33 +325,33 @@ class Client(object):
                 capture_locals=self.capture_locals,
             )
             data.update({
-                'sentry.interfaces.Stacktrace': stack_info,
+                'stacktrace': stack_info,
             })
 
-        if 'sentry.interfaces.Stacktrace' in data:
-            if self.include_paths:
-                for frame in data['sentry.interfaces.Stacktrace']['frames']:
-                    if frame.get('in_app') is not None:
-                        continue
+        if 'stacktrace' in data and self.include_paths:
+            for frame in data['stacktrace']['frames']:
+                if frame.get('in_app') is not None:
+                    continue
 
-                    path = frame.get('module')
-                    if not path:
-                        continue
+                path = frame.get('module')
+                if not path:
+                    continue
 
-                    if path.startswith('raven.'):
-                        frame['in_app'] = False
-                    else:
-                        frame['in_app'] = (
-                            any(path.startswith(x) for x in self.include_paths)
-                            and not
-                            any(path.startswith(x) for x in self.exclude_paths)
-                        )
+                if path.startswith('raven.'):
+                    frame['in_app'] = False
+                else:
+                    frame['in_app'] = (
+                        any(path.startswith(x) for x in self.include_paths) and
+                        not any(path.startswith(x) for x in self.exclude_paths)
+                    )
 
         if not culprit:
-            if 'sentry.interfaces.Stacktrace' in data:
-                culprit = get_culprit(data['sentry.interfaces.Stacktrace']['frames'])
-            elif data.get('sentry.interfaces.Exception', {}).get('stacktrace'):
-                culprit = get_culprit(data['sentry.interfaces.Exception']['stacktrace']['frames'])
+            if 'stacktrace' in data:
+                culprit = get_culprit(data['stacktrace']['frames'])
+            elif 'exception' in data:
+                stacktrace = data['exception']['values'][0].get('stacktrace')
+                if stacktrace:
+                    culprit = get_culprit(stacktrace['frames'])
 
         if not data.get('level'):
             data['level'] = kwargs.get('level') or logging.ERROR
@@ -342,6 +361,9 @@ class Client(object):
 
         if not data.get('modules'):
             data['modules'] = self.get_module_versions()
+
+        if self.release is not None:
+            data['release'] = self.release
 
         data['tags'] = merge_dicts(self.tags, data['tags'], tags)
         data['extra'] = merge_dicts(self.extra, data['extra'], extra)
@@ -404,7 +426,7 @@ class Client(object):
         >>> client.user_context({'email': 'foo@example.com'})
         """
         return self.context.merge({
-            'sentry.interfaces.User': data,
+            'user': data,
         })
 
     def http_context(self, data, **kwargs):
@@ -414,7 +436,7 @@ class Client(object):
         >>> client.http_context({'url': 'http://example.com'})
         """
         return self.context.merge({
-            'sentry.interfaces.Http': data,
+            'request': data,
         })
 
     def extra_context(self, data, **kwargs):
@@ -445,7 +467,7 @@ class Client(object):
         To use structured data (interfaces) with capture:
 
         >>> capture('raven.events.Message', message='foo', data={
-        >>>     'sentry.interfaces.Http': {
+        >>>     'request': {
         >>>         'url': '...',
         >>>         'data': {},
         >>>         'query_string': '...',
@@ -483,11 +505,10 @@ class Client(object):
         :param date: the datetime of this event
         :param time_spent: a integer value representing the duration of the
                            event (in milliseconds)
-        :param event_id: a 32-length unique string identifying this event
         :param extra: a dictionary of additional standard metadata
-        :param culprit: a string representing the cause of this event
-                        (generally a path to a function)
-        :return: a 32-length string identifying this event
+        :param stack: a stacktrace for the event
+        :param tags: list of extra tags
+        :return: a tuple with a 32-length string identifying this event
         """
 
         if not self.is_enabled():
@@ -505,7 +526,7 @@ class Client(object):
         # decode message so we can show the actual event
         try:
             data = self.decode(data)
-        except:
+        except Exception:
             message = '<failed decoding data>'
         else:
             message = data.pop('message', '<no message value>')
@@ -522,8 +543,11 @@ class Client(object):
         self.state.set_success()
 
     def _failed_send(self, e, url, data):
+        retry_after = 0
         if isinstance(e, APIError):
-            self.error_logger.error('Unable to capture event: %s', e.message)
+            if isinstance(e, RateLimited):
+                retry_after = e.retry_after
+            self.error_logger.error('Unable to capture event: %s(%s)', e.__class__.__name__, e.message)
         elif isinstance(e, HTTPError):
             body = e.read()
             self.error_logger.error(
@@ -537,12 +561,15 @@ class Client(object):
 
         message = self._get_log_message(data)
         self.error_logger.error('Failed to submit message: %r', message)
-        self.state.set_fail()
+        self.state.set_fail(retry_after=retry_after)
 
     def send_remote(self, url, data, headers=None):
+        # If the client is configured to raise errors on sending,
+        # the implication is that the backoff and retry strategies
+        # will be handled by the calling application
         if headers is None:
             headers = {}
-        if not self.state.should_try():
+        if not self.raise_send_errors and not self.state.should_try():
             message = self._get_log_message(data)
             self.error_logger.error(message)
             return
@@ -563,6 +590,8 @@ class Client(object):
                 transport.send(data, headers)
                 self._successful_send()
         except Exception as e:
+            if self.raise_send_errors:
+                raise
             failed_send(e)
 
     def send(self, auth_header=None, **data):

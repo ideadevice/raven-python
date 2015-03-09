@@ -94,7 +94,7 @@ def label_from_frame(frame):
 def get_culprit(frames, *args, **kwargs):
     # We iterate through each frame looking for a deterministic culprit
     # When one is found, we mark it as last "best guess" (best_guess) and then
-    # check it against ``exclude_paths``. If it isnt listed, then we
+    # check it against ``exclude_paths``. If it isn't listed, then we
     # use this option. If nothing is found, we use the "best guess".
     if args or kwargs:
         warnings.warn('get_culprit no longer does application detection')
@@ -121,7 +121,7 @@ def get_culprit(frames, *args, **kwargs):
 def _getitem_from_frame(f_locals, key, default=None):
     """
     f_locals is not guaranteed to have .get(), but it will always
-    support __getitem__. Even if it doesnt, we return ``default``.
+    support __getitem__. Even if it doesn't, we return ``default``.
     """
     try:
         return f_locals[key]
@@ -182,7 +182,7 @@ def get_stack_info(frames, transformer=transform, capture_locals=True,
     dictionary objects that are JSON-ready.
 
     We have to be careful here as certain implementations of the
-    _Frame class do not contain the nescesary data to lookup all
+    _Frame class do not contain the necessary data to lookup all
     of the information we want.
     """
     __traceback_hide__ = True  # NOQA
@@ -233,7 +233,7 @@ def get_stack_info(frames, transformer=transform, capture_locals=True,
         # This changes /foo/site-packages/baz/bar.py into baz/bar.py
         try:
             base_filename = sys.modules[module_name.split('.', 1)[0]].__file__
-            filename = abs_path.split(base_filename.rsplit('/', 2)[0], 1)[-1][1:]
+            filename = abs_path.split(base_filename.rsplit('/', 2)[0], 1)[-1].lstrip("/")
         except:
             filename = abs_path
 
@@ -246,7 +246,7 @@ def get_stack_info(frames, transformer=transform, capture_locals=True,
             try:
                 f_locals = to_dict(f_locals)
             except Exception:
-                f_locals = None
+                capture_locals = False
 
         frame_result = {
             'abs_path': abs_path,
@@ -256,7 +256,10 @@ def get_stack_info(frames, transformer=transform, capture_locals=True,
             'lineno': lineno + 1,
         }
         if capture_locals:
-            frame_result['vars'] = transformer(f_locals)
+            frame_result['vars'] = dict(
+                (k, transformer(v))
+                for k, v in six.iteritems(f_locals)
+            )
 
         if context_line is not None:
             frame_result.update({

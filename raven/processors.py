@@ -25,15 +25,17 @@ class Processor(object):
         if resp:
             data = resp
 
-        if 'sentry.interfaces.Stacktrace' in data:
-            self.filter_stacktrace(data['sentry.interfaces.Stacktrace'])
+        if 'exception' in data:
+            if 'values' in data['exception']:
+                for value in data['exception'].get('values', []):
+                    if 'stacktrace' in value:
+                        self.filter_stacktrace(value['stacktrace'])
 
-        if 'sentry.interfaces.Exception' in data:
-            if 'stacktrace' in data['sentry.interfaces.Exception']:
-                self.filter_stacktrace(data['sentry.interfaces.Exception']['stacktrace'])
+        if 'request' in data:
+            self.filter_http(data['request'])
 
-        if 'sentry.interfaces.Http' in data:
-            self.filter_http(data['sentry.interfaces.Http'])
+        if 'extra' in data:
+            data['extra'] = self.filter_extra(data['extra'])
 
         return data
 
@@ -42,6 +44,9 @@ class Processor(object):
 
     def filter_http(self, data):
         pass
+
+    def filter_extra(self, data):
+        return data
 
 
 class RemovePostDataProcessor(Processor):
@@ -90,9 +95,7 @@ class SanitizePasswordsProcessor(Processor):
         return value
 
     def filter_stacktrace(self, data):
-        if 'frames' not in data:
-            return
-        for frame in data['frames']:
+        for frame in data.get('frames', []):
             if 'vars' not in frame:
                 continue
             frame['vars'] = varmap(self.sanitize, frame['vars'])
@@ -104,14 +107,30 @@ class SanitizePasswordsProcessor(Processor):
 
             if isinstance(data[n], six.string_types) and '=' in data[n]:
                 # at this point we've assumed it's a standard HTTP query
-                querybits = []
-                for bit in data[n].split('&'):
-                    chunk = bit.split('=')
-                    if len(chunk) == 2:
-                        querybits.append((chunk[0], self.sanitize(*chunk)))
-                    else:
-                        querybits.append(chunk)
+                # or cookie
+                if n == 'cookies':
+                    delimiter = ';'
+                else:
+                    delimiter = '&'
 
-                data[n] = '&'.join('='.join(k) for k in querybits)
+                data[n] = self._sanitize_keyvals(data[n], delimiter)
             else:
                 data[n] = varmap(self.sanitize, data[n])
+                if n == 'headers' and 'Cookie' in data[n]:
+                    data[n]['Cookie'] = self._sanitize_keyvals(
+                        data[n]['Cookie'], ';'
+                    )
+
+    def filter_extra(self, data):
+        return varmap(self.sanitize, data)
+
+    def _sanitize_keyvals(self, keyvals, delimiter):
+        sanitized_keyvals = []
+        for keyval in keyvals.split(delimiter):
+            keyval = keyval.split('=')
+            if len(keyval) == 2:
+                sanitized_keyvals.append((keyval[0], self.sanitize(*keyval)))
+            else:
+                sanitized_keyvals.append(keyval)
+
+        return delimiter.join('='.join(keyval) for keyval in sanitized_keyvals)

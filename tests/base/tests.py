@@ -8,6 +8,7 @@ import raven
 import time
 from socket import socket, AF_INET, SOCK_DGRAM
 from raven.base import Client, ClientState
+from raven.exceptions import RateLimited
 from raven.transport import AsyncTransport
 from raven.utils.stacks import iter_stack_frames
 from raven.utils import six
@@ -62,6 +63,22 @@ class ClientStateTest(TestCase):
         self.assertEquals(state.last_check, None)
         self.assertEquals(state.retry_number, 0)
 
+    def test_should_try_retry_after(self):
+        state = ClientState()
+        state.status = state.ERROR
+        state.last_check = time.time()
+        state.retry_number = 1
+        state.retry_after = 1
+        self.assertFalse(state.should_try())
+
+    def test_should_try_retry_after_passed(self):
+        state = ClientState()
+        state.status = state.ERROR
+        state.last_check = time.time() - 1
+        state.retry_number = 1
+        state.retry_after = 1
+        self.assertTrue(state.should_try())
+
 
 class ClientTest(TestCase):
     def setUp(self):
@@ -95,6 +112,27 @@ class ClientTest(TestCase):
         send.side_effect = None
         client.send_remote('sync+http://example.com/api/store', 'foo')
         self.assertEquals(client.state.status, client.state.ONLINE)
+
+    @mock.patch('raven.transport.http.HTTPTransport.send')
+    @mock.patch('raven.base.ClientState.should_try')
+    def test_send_remote_failover_with_retry_after(self, should_try, send):
+        should_try.return_value = True
+
+        client = Client(
+            dsn='sync+http://public:secret@example.com/1'
+        )
+
+        # test error
+        send.side_effect = RateLimited('foo', 5)
+        client.send_remote('sync+http://example.com/api/store', 'foo')
+        self.assertEquals(client.state.status, client.state.ERROR)
+        self.assertEqual(client.state.retry_after, 5)
+
+        # test recovery
+        send.side_effect = None
+        client.send_remote('sync+http://example.com/api/store', 'foo')
+        self.assertEquals(client.state.status, client.state.ONLINE)
+        self.assertEqual(client.state.retry_after, 0)
 
     @mock.patch('raven.base.Client._registry.get_transport')
     @mock.patch('raven.base.ClientState.should_try')
@@ -149,7 +187,7 @@ class ClientTest(TestCase):
                 'Content-Type': 'application/octet-stream',
                 'X-Sentry-Auth': (
                     'Sentry sentry_timestamp=1328055286.51, '
-                    'sentry_client=raven-python/%s, sentry_version=4, '
+                    'sentry_client=raven-python/%s, sentry_version=6, '
                     'sentry_key=public, '
                     'sentry_secret=secret' % (raven.VERSION,))
             },
@@ -177,6 +215,35 @@ class ClientTest(TestCase):
                 'X-Sentry-Auth': 'foo'
             },
         )
+
+    @mock.patch('raven.transport.http.HTTPTransport.send')
+    @mock.patch('raven.base.ClientState.should_try')
+    def test_raise_exception_on_send_error(self, should_try, _send_remote):
+        should_try.return_value = True
+        client = Client(
+            servers=['sync+http://example.com'],
+            public_key='public',
+            secret_key='secret',
+            project=1,
+        )
+
+        # Test for the default behaviour in which a send error is handled by the client
+        _send_remote.side_effect = Exception()
+        client.capture('Message', data={}, date=None, time_spent=10,
+                       extra={}, stack=None, tags=None, message='Test message')
+        assert client.state.status == client.state.ERROR
+
+        # Test for the case in which a send error is raised to the calling frame.
+        client = Client(
+            servers=['sync+http://example.com'],
+            public_key='public',
+            secret_key='secret',
+            project=1,
+            raise_send_errors=True,
+        )
+        with self.assertRaises(Exception):
+            client.capture('Message', data={}, date=None, time_spent=10,
+                           extra={}, stack=None, tags=None, message='Test message')
 
     def test_encode_decode(self):
         data = {'foo': 'bar'}
@@ -227,7 +294,7 @@ class ClientTest(TestCase):
     def test_message_from_kwargs(self):
         try:
             raise ValueError('foo')
-        except:
+        except ValueError:
             self.client.captureException(message='test', data={})
 
         self.assertEquals(len(self.client.events), 1)
@@ -237,7 +304,7 @@ class ClientTest(TestCase):
     def test_explicit_message_on_exception_event(self):
         try:
             raise ValueError('foo')
-        except:
+        except ValueError:
             self.client.captureException(data={'message': 'foobar'})
 
         self.assertEquals(len(self.client.events), 1)
@@ -247,18 +314,18 @@ class ClientTest(TestCase):
     def test_exception_event(self):
         try:
             raise ValueError('foo')
-        except:
+        except ValueError:
             self.client.captureException()
 
         self.assertEquals(len(self.client.events), 1)
         event = self.client.events.pop(0)
         self.assertEquals(event['message'], 'ValueError: foo')
-        self.assertTrue('sentry.interfaces.Exception' in event)
-        exc = event['sentry.interfaces.Exception']
+        self.assertTrue('exception' in event)
+        exc = event['exception']['values'][0]
         self.assertEquals(exc['type'], 'ValueError')
         self.assertEquals(exc['value'], 'foo')
         self.assertEquals(exc['module'], ValueError.__module__)  # this differs in some Python versions
-        assert 'sentry.interfaces.Stacktrace' not in event
+        assert 'stacktrace' not in event
         stacktrace = exc['stacktrace']
         self.assertEquals(len(stacktrace['frames']), 1)
         frame = stacktrace['frames'][0]
@@ -291,7 +358,7 @@ class ClientTest(TestCase):
         self.assertEquals(len(self.client.events), 1)
         event = self.client.events.pop(0)
         self.assertEquals(event['message'], 'DecoratorTestException')
-        exc = event['sentry.interfaces.Exception']
+        exc = event['exception']['values'][0]
         self.assertEquals(exc['type'], 'DecoratorTestException')
         self.assertEquals(exc['module'], self.DecoratorTestException.__module__)
         stacktrace = exc['stacktrace']
@@ -308,7 +375,7 @@ class ClientTest(TestCase):
 
         try:
             test3()
-        except:
+        except Exception:
             pass
 
         self.assertEquals(len(self.client.events), 0)
@@ -319,7 +386,7 @@ class ClientTest(TestCase):
         self.assertEquals(len(self.client.events), 1)
         event = self.client.events.pop(0)
         self.assertEquals(event['message'], 'test')
-        self.assertFalse('sentry.interfaces.Stacktrace' in event)
+        assert 'stacktrace' not in event
         self.assertTrue('timestamp' in event)
 
     def test_context(self):
@@ -328,7 +395,7 @@ class ClientTest(TestCase):
         })
         try:
             raise ValueError('foo')
-        except:
+        except ValueError:
             self.client.captureException()
         else:
             self.fail('Exception should have been raised')
@@ -348,9 +415,9 @@ class ClientTest(TestCase):
         self.assertEquals(len(self.client.events), 1)
         event = self.client.events.pop(0)
         self.assertEquals(event['message'], 'test')
-        self.assertTrue('sentry.interfaces.Stacktrace' in event)
-        self.assertEquals(len(frames), len(event['sentry.interfaces.Stacktrace']['frames']))
-        for frame, frame_i in zip(frames, event['sentry.interfaces.Stacktrace']['frames']):
+        assert 'stacktrace' in event
+        self.assertEquals(len(frames), len(event['stacktrace']['frames']))
+        for frame, frame_i in zip(frames, event['stacktrace']['frames']):
             self.assertEquals(frame[0].f_code.co_filename, frame_i['abs_path'])
             self.assertEquals(frame[0].f_code.co_name, frame_i['function'])
 
@@ -360,7 +427,7 @@ class ClientTest(TestCase):
         self.assertEquals(len(self.client.events), 1)
         event = self.client.events.pop(0)
         self.assertEquals(event['message'], 'test')
-        self.assertTrue('sentry.interfaces.Stacktrace' in event)
+        self.assertTrue('stacktrace' in event)
         self.assertTrue('timestamp' in event)
 
     def test_site(self):

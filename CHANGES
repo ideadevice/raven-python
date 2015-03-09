@@ -1,8 +1,35 @@
+Version 5.2.0
+-------------
+
+* Protocol version is now 6 (requires Sentry 7.0 or newer).
+* Added ``release`` option to Client.
+* Added ``fetch_git_sha`` helper.
+* Added ``fetch_package_version`` helper.
+* Added cookie string sanatizing.
+* Added threaded request transport: "threaded+requests+http(s)".
+
+Version 5.1.0
+-------------
+
+* Added aiohttp transport.
+* Corrected behavior with auto_log_stacks and exceptions.
+* Add support for certifi.
+* Expanded Flask support.
+* Expanded Django support.
+* Corrected an issue where processors were not correctly applying.
+
+Version 5.0.0
+-------------
+
+* Sentry client protocol is now version 5.
+* Various improvements to threaded transport.
+
 Version 4.2.0
 -------------
 
 * SSL verification is now on by default.
 * Rate limits and other valid API errors are now handled more gracefully.
+* Added ``last_event_id`` and ``X-Sentry-ID`` header to Flask.
 
 Version 4.1.0
 -------------
